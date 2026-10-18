@@ -40,30 +40,46 @@ export class TunnelManager extends EventEmitter {
     };
   }
 
-  start(rawCommand) {
-    if (!rawCommand || !rawCommand.trim()) {
-      throw new Error('Cloudflare Tunnel command cannot be empty.');
+  /**
+   * Starts the tunnel using a PRE-CONFIGURED binary only (audit P0-01).
+   *
+   * Arbitrary command text is never executed: the caller cannot supply a command
+   * or shell string. The executable path is read from CLOUDFLARE_TUNNEL_BIN and
+   * the argument list from CLOUDFLARE_TUNNEL_ARGS (whitespace separated), and the
+   * process is spawned WITHOUT a shell, so no shell metacharacters are interpreted.
+   * Operators who have not configured a binary must start the tunnel outside the
+   * application runtime under a separate low-privilege identity.
+   *
+   * @param {string} [_ignoredRequestedCommand] retained for signature compatibility; never executed
+   */
+  start(_ignoredRequestedCommand) {
+    const bin = (process.env.CLOUDFLARE_TUNNEL_BIN || '').trim();
+    if (!bin) {
+      throw new Error(
+        'Tunnel execution is disabled. Configure CLOUDFLARE_TUNNEL_BIN (absolute path to cloudflared) and optionally CLOUDFLARE_TUNNEL_ARGS, or run the tunnel outside the application.'
+      );
     }
+
+    const args = (process.env.CLOUDFLARE_TUNNEL_ARGS || 'tunnel --no-autoupdate run')
+      .split(/\s+/)
+      .filter(Boolean);
 
     if (this.process && (this.status === 'RUNNING' || this.status === 'STARTING')) {
       this.stop();
     }
 
-    const trimmed = rawCommand.trim();
-    this.command = trimmed;
+    this.command = `${bin} ${args.join(' ')}`;
     this.status = 'STARTING';
     this.startedAt = new Date().toISOString();
-    this.appendLog(`[TunnelManager] Launching tunnel command: ${trimmed}`);
+    this.appendLog('[TunnelManager] Launching operator-configured tunnel binary (no shell).');
 
     try {
-      // Execute via shell (cmd.exe on Windows / sh on Unix) so tokens, flags, and paths execute cleanly
-      const isWindows = process.platform === 'win32';
-      const shell = isWindows ? (process.env.ComSpec || 'cmd.exe') : '/bin/sh';
-      const shellArgs = isWindows ? ['/c', trimmed] : ['-c', trimmed];
-
-      const child = spawn(shell, shellArgs, {
+      // No shell: the argument vector is passed directly, so request-derived text
+      // can never be interpreted as a command.
+      const child = spawn(bin, args, {
         detached: false,
         stdio: ['ignore', 'pipe', 'pipe'],
+        shell: false,
         env: { ...process.env }
       });
 

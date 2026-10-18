@@ -6,6 +6,7 @@ import { getDatabase } from './database.js';
 import { MerchantRepository } from './repositories/merchant.repository.js';
 import { ReceivingAccountRepository } from './repositories/receiving-account.repository.js';
 import { CustomerRepository } from './repositories/customer.repository.js';
+import { migrateSecretRows } from '@youpi/common';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -134,6 +135,63 @@ export function runMigrations(targetDb) {
   `); } catch {}
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_pending_event ON payment_events_outbox (payment_id, event) WHERE flushed = 0;"); } catch {}
   try { db.exec("CREATE INDEX IF NOT EXISTS idx_outbox_pending ON payment_events_outbox (flushed, created_at);"); } catch {}
+  // Observer security (P0-03/P0-04/P0-05): single-use pairing challenges and replay guard.
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS observer_pairing_tokens (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `); } catch {}
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_token_hash ON observer_pairing_tokens (token_hash);"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_pairing_token_expiry ON observer_pairing_tokens (expires_at);"); } catch {}
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS observer_request_nonces (
+      nonce TEXT PRIMARY KEY,
+      scope TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_observer_nonce_created ON observer_request_nonces (created_at);"); } catch {}
+  // Dedicated observer credentials, separated from merchant/admin API keys.
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS observer_credentials (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      key_id TEXT NOT NULL UNIQUE,
+      label TEXT,
+      secret_enc TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      rotated_at TEXT,
+      revoked_at TEXT,
+      last_used_at TEXT
+    );
+  `); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_observer_credential_merchant ON observer_credentials (merchant_id, status);"); } catch {}
+  // Authoritative bank/acquirer confirmations (BANK_CONFIRMED provenance only).
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS bank_confirmations (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+      bank_reference TEXT NOT NULL,
+      amount_paise INTEGER NOT NULL,
+      source TEXT NOT NULL DEFAULT 'ACQUIRER',
+      confirmed_by TEXT NOT NULL,
+      raw_payload TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `); } catch {}
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_confirmation_unique ON bank_confirmations (receiving_account_id, bank_reference);"); } catch {}
+  // Scoped, expiring checkout credential for payment-status polling.
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN checkout_token_hash TEXT;"); } catch {}
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN checkout_token_expires_at TEXT;"); } catch {}
+  // Idempotent webhook delivery: one delivery row per (payment, event).
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_delivery_idempotency ON webhook_deliveries (payment_id, event_type);"); } catch {}
   // P2-03: independent unique constraint for merchant idempotency keys.
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_idempotency ON payment_sessions (merchant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;"); } catch {}
   try { db.exec("ALTER TABLE payment_receiving_accounts ADD COLUMN is_merchant_enabled INTEGER NOT NULL DEFAULT 1;"); } catch {}
@@ -212,6 +270,23 @@ export function runMigrations(targetDb) {
       merchantRepo.update(m.id, { apiKey: resolveDefaultMerchantApiKey() });
     }
   }
+
+  // Seal legacy plaintext secrets at rest (safe, idempotent migration): device
+  // signing keys and observer credential secrets are re-written encrypted and the
+  // plaintext copies are replaced in place.
+  try {
+    const deviceRows = db.query("SELECT id, signing_key_hash AS value FROM android_devices WHERE signing_key_hash IS NOT NULL").map(r => ({ id: r.id, value: r.value }));
+    migrateSecretRows(deviceRows, (id, sealedValue) => {
+      db.execute('UPDATE android_devices SET signing_key_hash = ? WHERE id = ?', [sealedValue, id]);
+    });
+  } catch {}
+
+  try {
+    const credRows = db.query("SELECT id, secret_enc AS value FROM observer_credentials WHERE secret_enc IS NOT NULL").map(r => ({ id: r.id, value: r.value }));
+    migrateSecretRows(credRows, (id, sealedValue) => {
+      db.execute('UPDATE observer_credentials SET secret_enc = ? WHERE id = ?', [sealedValue, id]);
+    });
+  } catch {}
 
   // Seed default UPI receiving account if none
   const accountRepo = new ReceivingAccountRepository(db);

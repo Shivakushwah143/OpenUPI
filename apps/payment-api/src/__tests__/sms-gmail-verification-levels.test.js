@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { Database } from '@youpi/db';
 import { PaymentStatus, PaymentMethod, ConfirmationStatus } from '@youpi/common';
+import { signObserverRequest } from '@youpi/common';
 import { startServer } from '../index.js';
 
 describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', () => {
@@ -20,6 +21,18 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     await apiInstance.close();
     testDb.close();
   });
+
+  /** Signed observer ingest (audit P0-03): credentials are mandatory. */
+  async function signedPoller(body) {
+    const path = '/api/v1/pollers/events';
+    const observerKey = testDb.queryOne('SELECT api_key FROM merchants ORDER BY created_at ASC LIMIT 1').api_key;
+    const rawBody = JSON.stringify(body);
+    return fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...signObserverRequest({ secret: observerKey, method: 'POST', path, rawBody }) },
+      body: rawBody
+    });
+  }
 
   test('POST /api/v1/admin/queue/clear expires all waiting UPI queue sessions', async () => {
     const sessionRepo = apiInstance.app.context.sessionRepo;
@@ -195,17 +208,13 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     assert.equal(sAfterSms.confirmationStatus, ConfirmationStatus.REPORTED);
 
     // 2nd hit arrives from Gmail poller within the corroboration window -> Level 2 evidence
-    const gmailRes = await fetch(`${baseUrl}/api/v1/pollers/events`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const gmailRes = await signedPoller({
         source: 'GMAIL',
         receivingAccountId,
         amountPaise: '45000',
         amount: '450.00',
         observedAt: new Date().toISOString()
-      })
-    });
+      });
     assert.equal(gmailRes.status, 200);
     const gmailResult = await gmailRes.json();
     assert.equal(gmailResult.accepted, true);
@@ -227,18 +236,14 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     );
     assert.ok(smsObservation?.bank_reference_number);
 
-    const corroborateRes = await fetch(`${baseUrl}/api/v1/pollers/events`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const corroborateRes = await signedPoller({
         source: 'GOOGLE_MESSAGES',
         receivingAccountId,
         amountPaise: '45000',
         amount: '450.00',
         bankReferenceNumber: smsObservation.bank_reference_number,
         observedAt: new Date().toISOString()
-      })
-    });
+      });
     assert.equal(corroborateRes.status, 200);
     const corroborateData = await corroborateRes.json();
     assert.equal(corroborateData.attribution.attributed, true);

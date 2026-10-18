@@ -127,13 +127,21 @@ export class AndroidObserverDriver {
     if (!this.deviceId) throw new Error('Cannot send heartbeat: device not paired.');
     const url = `${this.apiBaseUrl}/api/v1/pollers/android/heartbeat`;
 
+    // Heartbeats are authenticated exactly like observations (audit P0-04):
+    // HMAC-SHA256 over `<rawBody>:<timestamp>` with the device signing key.
+    const timestamp = Date.now().toString();
+    const bodyString = JSON.stringify({ deviceId: this.deviceId, timestamp: Date.now() });
+    const signature = generateHmac(`${bodyString}:${timestamp}`, this.signingKey);
+
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Device-Id': this.deviceId
+        'X-Device-Id': this.deviceId,
+        'X-Timestamp': timestamp,
+        'X-Signature': signature
       },
-      body: JSON.stringify({ deviceId: this.deviceId, timestamp: Date.now() })
+      body: bodyString
     });
 
     return await res.json();

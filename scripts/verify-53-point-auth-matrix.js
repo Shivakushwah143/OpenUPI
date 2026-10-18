@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { Database, runMigrations } from '../packages/db/src/index.js';
 import { MerchantRepository } from '../packages/db/src/repositories/merchant.repository.js';
 import { ReceivingAccountRepository } from '../packages/db/src/repositories/receiving-account.repository.js';
@@ -732,15 +733,38 @@ async function run53PointMatrix() {
     assert.equal(dashSettings.body.businessName, 'Nova Commerce Ltd');
     console.log('  [✓] Test 51 Passed: Merchant dashboard settings operational');
 
-    // 52. Observer services work
+    // 52. Observer services work — device endpoints are HMAC-signed and unsigned
+    // requests are refused (audit P0-04).
     console.log('[Test 52] Observer integration endpoints operational...');
-    const pollerHeartbeat = await httpReq('POST', `${apiBase}/api/v1/pollers/heartbeat`, {
+    const heartbeatDeviceId = 'android_dev_01';
+    const heartbeatSigningKey = 'verify53_heartbeat_signing_key';
+    testDb.execute(
+      `INSERT INTO android_devices (id, merchant_id, device_name, device_model, signing_key_hash, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, datetime('now'))`,
+      [heartbeatDeviceId, merchant.id, 'Matrix Phone', 'Matrix Model', heartbeatSigningKey]
+    );
+
+    const unsignedHeartbeat = await httpReq('POST', `${apiBase}/api/v1/pollers/heartbeat`, {
       source: 'ANDROID_OBSERVER',
-      deviceId: 'android_dev_01',
+      deviceId: heartbeatDeviceId,
       timestamp: new Date().toISOString()
     });
+    assert.equal(unsignedHeartbeat.status, 401);
+
+    const heartbeatPayload = { deviceId: heartbeatDeviceId };
+    const heartbeatBody = JSON.stringify(heartbeatPayload);
+    const heartbeatTimestamp = String(Date.now());
+    const heartbeatSignature = crypto
+      .createHmac('sha256', heartbeatSigningKey)
+      .update(`${heartbeatBody}:${heartbeatTimestamp}`)
+      .digest('hex');
+    const pollerHeartbeat = await httpReq('POST', `${apiBase}/api/v1/pollers/heartbeat`, heartbeatPayload, {
+      'X-Device-Id': heartbeatDeviceId,
+      'X-Timestamp': heartbeatTimestamp,
+      'X-Signature': heartbeatSignature
+    });
     assert.equal(pollerHeartbeat.status, 200);
-    console.log('  [✓] Test 52 Passed: Observer services operational');
+    console.log('  [✓] Test 52 Passed: Observer services operational (signed device heartbeat accepted, unsigned refused)');
 
     // 53. Control center works
     console.log('[Test 53] Control center and health reporting works...');

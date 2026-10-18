@@ -20,6 +20,7 @@ const testFiles = [
   'apps/sms-observer/src/__tests__/sms-observer.test.js',
   'apps/android-observer-app/__tests__/android-observer.test.js',
   'apps/control-center/src/__tests__/control-center.test.js',
+  'apps/payment-api/src/__tests__/security-hardening.test.js',
   'apps/payment-api/src/__tests__/payment-api.test.js',
   'apps/payment-api/src/__tests__/counter-payments.test.js',
   'apps/payment-api/src/__tests__/selling-modes-and-cod.test.js',

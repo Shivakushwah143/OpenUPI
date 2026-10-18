@@ -6,4 +6,6 @@ export * from './upi.js';
 export * from './upi-providers.js';
 export * from './contracts.js';
 export * from './state-machine.js';
+export * from './observer-auth.js';
+export * from './secret-vault.js';
 export * from './runtime-config.js';

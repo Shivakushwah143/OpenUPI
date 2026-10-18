@@ -33,16 +33,25 @@ describe('Android Payment Observer Integration Tests', () => {
     );
   });
 
-  test('successfully pairs Android device with valid enrollment token', async () => {
-    const enrollmentSecret = process.env.ANDROID_ENROLLMENT_SECRET || 'android_pairing_enrollment_secret_key_32_chars';
-    const pairResult = await driver.pair(enrollmentSecret);
+  test('successfully pairs Android device with a single-use admin pairing challenge', async () => {
+    // Preconditions (audit P0-05): enrollment requires a short-lived, single-use
+    // challenge issued by the admin API. Static/predictable tokens are refused.
+    const base = `http://localhost:${apiInstance.port}`;
+    const qrRes = await fetch(`${base}/api/v1/admin/sms-gateway/pair-qr`);
+    assert.equal(qrRes.status, 200);
+    const qr = await qrRes.json();
+    assert.ok(qr.enrollmentToken);
 
+    const pairResult = await driver.pair(qr.enrollmentToken);
     assert.ok(pairResult.paired);
     assert.ok(pairResult.deviceId);
     assert.ok(pairResult.signingKey);
-
     assert.equal(driver.deviceId, pairResult.deviceId);
     assert.equal(driver.signingKey, pairResult.signingKey);
+
+    // The static legacy enrollment secret must no longer work.
+    const legacySecret = process.env.ANDROID_ENROLLMENT_SECRET || 'android_pairing_enrollment_secret_key_32_chars';
+    await assert.rejects(() => driver.pair(legacySecret), /Device pairing failed/);
   });
 
   test('sends heartbeat acknowledging liveness', async () => {

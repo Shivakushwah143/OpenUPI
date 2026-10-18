@@ -16,9 +16,13 @@ describe('Google Messages / SMS Payment Observer Integration Tests', () => {
   before(async () => {
     testDb = new Database({ inMemory: true });
     apiInstance = await startPaymentApi(6196, testDb);
+    // Observer ingest is signed (audit P0-03): use the merchant API key issued by
+    // the gateway as the observer credential.
+    process.env.YOUPI_OBSERVER_KEY = testDb.queryOne('SELECT api_key FROM merchants ORDER BY created_at ASC LIMIT 1').api_key;
     smsInstance = await startSmsObserver(6098, {
       apiBaseUrl: `http://localhost:${apiInstance.port}`,
-      receivingAccountId: '00000000-0000-0000-0000-000000000002'
+      receivingAccountId: '00000000-0000-0000-0000-000000000002',
+      observerKey: process.env.YOUPI_OBSERVER_KEY
     });
     smsBaseUrl = `http://localhost:${smsInstance.port}`;
   });

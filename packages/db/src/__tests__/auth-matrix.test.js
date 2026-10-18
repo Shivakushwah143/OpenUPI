@@ -14,6 +14,7 @@ import { TimingEngine } from '@youpi/core';
 import { AttributionEngine } from '@youpi/core';
 import { WebhookEngine } from '@youpi/core';
 import { generateQrSvg } from '../../../../apps/checkout-portal/src/qr.js';
+import { signObserverRequest } from '@youpi/common';
 import {
   buildUpiUri,
   buildUpiIntentUri,
@@ -565,8 +566,18 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     assert.equal(dashSettings.status, 200);
     assert.equal(dashSettings.body.businessName, 'Nova Commerce Ltd');
 
-    // 52. Observer services work
-    const pollerActive = await httpReq('GET', `${apiBase}/api/v1/pollers/active-window`);
+    // 52. Observer services work — observer intake now requires a signed credential
+    // derived from the merchant credential (audit P0-03).
+    const observerSecret = merchant.apiKey || 'apikey_auth_matrix_observer_secret';
+    if (!merchant.apiKey) {
+      merchantRepo.update(merchant.id, { apiKey: observerSecret });
+    }
+    const pollerActive = await httpReq(
+      'GET',
+      `${apiBase}/api/v1/pollers/active-window`,
+      null,
+      signObserverRequest({ secret: observerSecret, method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
+    );
     assert.equal(pollerActive.status, 200);
     assert.ok(Array.isArray(pollerActive.body.sessions));
 

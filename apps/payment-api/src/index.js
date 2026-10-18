@@ -47,6 +47,17 @@ import { registerAdminRoutes } from './routes/admin.routes.js';
 import { registerCustomerRoutes } from './routes/customer.routes.js';
 import { registerDeviceRoutes } from './routes/device.routes.js';
 import { getWhatsAppBerryService, WhatsAppBerryService } from './services/whatsapp-berry.service.js';
+import {
+  requireAdmin,
+  verifySignedRequest,
+  verifySignedDeviceRequest,
+  resolveObserverCredential,
+  identifyPrincipal,
+  resolveAdminApiKey,
+  isProduction,
+  MERCHANT_ALLOWED_ADMIN_PATHS,
+  MERCHANT_ROLE
+} from './services/api-auth.js';
 
 export function createPaymentApp(customDb = null, options = {}) {
   const db = customDb || getDatabase();
@@ -432,6 +443,152 @@ export function createPaymentApp(customDb = null, options = {}) {
     whatsappBerryService,
     webhookEngine
   };
+
+  // ---------------------------------------------------------------------------
+  // Server-enforced authentication / authorization (audit P0-02..P0-07).
+  // Runs before ANY route handler; identity always comes from a credential, never
+  // from caller-supplied merchant/account IDs.
+  // ---------------------------------------------------------------------------
+  const OBSERVER_SIGNED_PATHS = new Set([
+    '/api/v1/pollers/events',
+    '/api/v1/pollers/active-window'
+  ]);
+  const DEVICE_SIGNED_PATHS = new Set([
+    '/api/v1/pollers/android/events',
+    '/api/v1/observers/sms',
+    '/api/v1/pollers/android/heartbeat',
+    '/api/v1/pollers/heartbeat',
+    '/api/v1/observers/heartbeat'
+  ]);
+
+  if (isProduction() && !resolveAdminApiKey()) {
+    throw new Error(
+      'Refusing to start: ADMIN_API_KEY is not configured. Administrative APIs are never exposed unsigned in production.'
+    );
+  }
+
+  server.setRequestGuard(async (req, res, pathname, method) => {
+    const needsRawBody = OBSERVER_SIGNED_PATHS.has(pathname) || DEVICE_SIGNED_PATHS.has(pathname);
+    if (needsRawBody) {
+      req.rawBody = await new Promise(resolve => {
+        let data = '';
+        let aborted = false;
+        req.on('data', chunk => {
+          if (aborted) return;
+          data += chunk;
+          if (data.length > 256 * 1024) {
+            aborted = true;
+            HttpServer.json(res, 413, { error: 'Payload Too Large' });
+            req.destroy();
+          }
+        });
+        req.on('end', () => resolve(data));
+        req.on('error', () => resolve(data));
+      });
+      if (res.writableEnded) return false;
+    }
+
+    // --- Administrative & merchant-management surface ---
+    if (pathname.startsWith('/api/v1/admin/')) {
+      const merchantScoped = MERCHANT_ALLOWED_ADMIN_PATHS.includes(pathname);
+      const principal = requireAdmin(req, res, { ctx: context, allowMerchant: merchantScoped });
+      if (!principal) return false;
+      if (principal.role === MERCHANT_ROLE) {
+        const claimed = req.headers['x-merchant-id'];
+        if (claimed && claimed !== principal.merchantId) {
+          HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant administrative access refused.' });
+          return false;
+        }
+      }
+      req.auth = principal;
+      return true;
+    }
+
+    // --- Trusted observer ingest (signed, tenant derived from credential) ---
+    if (OBSERVER_SIGNED_PATHS.has(pathname)) {
+      const credential = resolveObserverCredential(req, context);
+      if (!credential.ok) {
+        HttpServer.json(res, 401, {
+          error: 'UNAUTHORIZED',
+          reason: credential.code,
+          message: 'Observer credential required (X-Observer-Key).'
+        });
+        return false;
+      }
+      const verified = verifySignedRequest({
+        req,
+        res,
+        ctx: context,
+        secret: credential.merchant.apiKey,
+        scope: `observer:${credential.merchant.id}`,
+        rawBody: req.rawBody || ''
+      });
+      if (!verified) return false;
+      req.auth = {
+        role: 'OBSERVER',
+        actorId: `observer:${credential.merchant.id}`,
+        merchantId: credential.merchant.id,
+        merchant: credential.merchant
+      };
+      return true;
+    }
+
+    // --- Android/SMS device ingest (signed with the paired device key) ---
+    if (DEVICE_SIGNED_PATHS.has(pathname)) {
+      let deviceId = req.headers['x-device-id'];
+      if (!deviceId && req.rawBody) {
+        try {
+          deviceId = JSON.parse(req.rawBody || '{}').deviceId;
+        } catch { /* ignored: reported as missing device id */ }
+      }
+      if (!deviceId) {
+        HttpServer.json(res, 401, { error: 'UNAUTHORIZED', reason: 'MISSING_DEVICE_ID', message: 'Signed device request requires X-Device-Id.' });
+        return false;
+      }
+      const device = context.db.queryOne('SELECT * FROM android_devices WHERE id = ? AND is_active = 1', [deviceId]);
+      if (!device) {
+        HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Device not authorized or inactive.' });
+        return false;
+      }
+      const verified = verifySignedDeviceRequest({
+        req,
+        res,
+        ctx: context,
+        secret: device.signing_key_hash,
+        scope: `device:${deviceId}`,
+        rawBody: req.rawBody || ''
+      });
+      if (!verified) return false;
+      req.auth = { role: 'OBSERVER_DEVICE', actorId: deviceId, merchantId: device.merchant_id, deviceId, device };
+      return true;
+    }
+
+    // --- Merchant payment creation: credential-scoped tenant (P0-07) ---
+    if (pathname === '/api/v1/payments' && method === 'POST') {
+      const principal = identifyPrincipal(req, context);
+      if (!principal) {
+        if (isProduction()) {
+          HttpServer.json(res, 401, {
+            error: 'UNAUTHORIZED',
+            message: 'Merchant API key required to create payments in production (X-API-Key).'
+          });
+          return false;
+        }
+        return true;
+      }
+      if (principal.role === MERCHANT_ROLE) {
+        const claimed = req.headers['x-merchant-id'];
+        if (claimed && claimed !== principal.merchantId) {
+          HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant payment creation refused.' });
+          return false;
+        }
+      }
+      req.auth = principal;
+      return true;
+    }
+
+    return true;
+  });
 
   registerPaymentRoutes(server, context);
   registerCheckoutRoutes(server, context);

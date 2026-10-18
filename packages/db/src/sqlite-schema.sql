@@ -95,6 +95,8 @@ CREATE TABLE IF NOT EXISTS payment_sessions (
     confirmed_at TEXT,
     confirmed_by TEXT,
     confirmation_note TEXT,
+    checkout_token_hash TEXT,
+    checkout_token_expires_at TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -138,6 +140,64 @@ CREATE TABLE IF NOT EXISTS payment_events_outbox (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_pending_event
     ON payment_events_outbox (payment_id, event) WHERE flushed = 0;
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON payment_events_outbox (flushed, created_at);
+
+-- 5a-0. Observer security tables (audit P0-03/P0-04/P0-05):
+-- single-use short-lived pairing challenges (token stored hashed) and the
+-- replay guard for signed observer/device requests.
+CREATE TABLE IF NOT EXISTS observer_pairing_tokens (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pairing_token_hash ON observer_pairing_tokens (token_hash);
+CREATE INDEX IF NOT EXISTS idx_pairing_token_expiry ON observer_pairing_tokens (expires_at);
+
+CREATE TABLE IF NOT EXISTS observer_request_nonces (
+    nonce TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 5a-2. Dedicated observer credentials (observer hardening sprint item 1):
+-- observation ingest authenticates with its OWN credential, never with a merchant
+-- or admin API key. Only the (encrypted) secret is stored; the caller presents the
+-- public key_id and signs with the secret.
+CREATE TABLE IF NOT EXISTS observer_credentials (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    key_id TEXT NOT NULL UNIQUE,
+    label TEXT,
+    secret_enc TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    rotated_at TEXT,
+    revoked_at TEXT,
+    last_used_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_observer_credential_merchant ON observer_credentials (merchant_id, status);
+
+-- 7c. Authoritative bank/acquirer confirmations. A row here is the ONLY automatic
+-- source of BANK_CONFIRMED provenance; corroborated observer reports can raise
+-- evidence but can never confirm a payment on their own.
+CREATE TABLE IF NOT EXISTS bank_confirmations (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+    bank_reference TEXT NOT NULL,
+    amount_paise INTEGER NOT NULL,
+    source TEXT NOT NULL DEFAULT 'ACQUIRER',
+    confirmed_by TEXT NOT NULL,
+    raw_payload TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_confirmation_unique
+    ON bank_confirmations (receiving_account_id, bank_reference);
 
 -- 5. Payment Observations Table
 CREATE TABLE IF NOT EXISTS payment_observations (

@@ -4,6 +4,7 @@ import http from 'node:http';
 import { Database } from '@youpi/db';
 import { startServer } from '../index.js';
 import { PaymentStatus, ObserverSource, verifyHmac } from '@youpi/common';
+import { signObserverRequest } from '@youpi/common';
 
 describe('Payment API End-to-End HTTP Integration Tests', () => {
   let serverInstance;
@@ -53,6 +54,24 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       }
 
       req.end();
+    });
+  }
+
+  /**
+   * Signed observer ingest helper: observer credentials are required for
+   * /api/v1/pollers/events (audit P0-03).
+   */
+  async function signedPoller(body) {
+    const path = '/api/v1/pollers/events';
+    const observerKey = testDb.queryOne('SELECT api_key FROM merchants ORDER BY created_at ASC LIMIT 1').api_key;
+    const rawBody = JSON.stringify(body);
+    return request(path, {
+      method: 'POST',
+      body: rawBody,
+      headers: {
+        'Content-Type': 'application/json',
+        ...signObserverRequest({ secret: observerKey, method: 'POST', path, rawBody })
+      }
     });
   }
 
@@ -119,16 +138,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
     assert.equal(doneA.body.status, PaymentStatus.PROCESSING);
 
     // 5. Observer reports incoming ₹200 UPI payment
-    const obsRes = await request('/api/v1/pollers/events', {
-      method: 'POST',
-      body: {
+    const obsRes = await signedPoller({
         source: ObserverSource.GOOGLE_MESSAGES,
         receivingAccountId: '00000000-0000-0000-0000-000000000002',
         amount: '200.00',
         utr: 'UTR-HTTP-999',
         observedAt: new Date().toISOString()
-      }
-    });
+      });
 
     assert.equal(obsRes.status, 200);
     assert.equal(obsRes.body.attribution.attributed, true);
@@ -141,16 +157,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
 
     // 5b. A second INDEPENDENT channel reports the SAME bank reference (UTR-HTTP-999)
     // -> the bank credit is independently verified and only now the payment succeeds.
-    const confirmObsRes = await request('/api/v1/pollers/events', {
-      method: 'POST',
-      body: {
+    const confirmObsRes = await signedPoller({
         source: ObserverSource.GMAIL,
         receivingAccountId: '00000000-0000-0000-0000-000000000002',
         amount: '200.00',
         utr: 'UTR-HTTP-999',
         observedAt: new Date().toISOString()
-      }
-    });
+      });
 
     assert.equal(confirmObsRes.status, 200);
     assert.equal(confirmObsRes.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
@@ -525,16 +538,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
     await request(`/api/v1/checkout/${paymentId}/payment-done`, { method: 'POST' });
 
     // 3. Observation 1: Google Messages SMS arrives -> Level 1 (L1 Single Verification)
-    const obs1 = await request('/api/v1/pollers/events', {
-      method: 'POST',
-      body: {
+    const obs1 = await signedPoller({
         source: 'GOOGLE_MESSAGES',
         receivingAccountId: '00000000-0000-0000-0000-000000000002',
         amount: '650.00',
         utr: 'UTR-TIER-001',
         observedAt: new Date().toISOString()
-      }
-    });
+      });
 
     assert.equal(obs1.status, 200);
     assert.equal(obs1.body.attribution.attributed, true);
@@ -548,16 +558,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
     assert.deepEqual(checkL1.body.verificationSources, ['GOOGLE_MESSAGES']);
 
     // 4. Observation 2: Gmail arrives 2 seconds later -> Upgrades to Level 2 (Dual Verification: SMS + Gmail)
-    const obs2 = await request('/api/v1/pollers/events', {
-      method: 'POST',
-      body: {
+    const obs2 = await signedPoller({
         source: 'GMAIL',
         receivingAccountId: '00000000-0000-0000-0000-000000000002',
         amount: '650.00',
         utr: 'UTR-TIER-001',
         observedAt: new Date().toISOString()
-      }
-    });
+      });
 
     assert.equal(obs2.status, 200);
     assert.equal(obs2.body.attribution.verificationLevel, 2);
@@ -617,19 +624,22 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
 
       assert.equal(updateRes.status, 200);
       assert.equal(updateRes.body.webhookUrl, receiverUrl);
-      assert.equal(updateRes.body.webhookSecret, customSecret);
+      assert.equal(updateRes.body.webhookSecretConfigured, true);
+      assert.equal(updateRes.body.webhookSecret, undefined);
 
       // 3. Read back via GET /api/v1/admin/merchant-settings
       const getMerchantRes = await request('/api/v1/admin/merchant-settings');
       assert.equal(getMerchantRes.status, 200);
       assert.equal(getMerchantRes.body.webhookUrl, receiverUrl);
-      assert.equal(getMerchantRes.body.webhookSecret, customSecret);
+      assert.equal(getMerchantRes.body.webhookSecretConfigured, true);
+      assert.equal(getMerchantRes.body.webhookSecret, undefined);
 
       // 4. Also read back via GET /api/v1/admin/all-settings
       const getAllRes = await request('/api/v1/admin/all-settings');
       assert.equal(getAllRes.status, 200);
       assert.equal(getAllRes.body.webhookUrl, receiverUrl);
-      assert.equal(getAllRes.body.webhookSecret, customSecret);
+      assert.equal(getAllRes.body.webhookSecretConfigured, true);
+      assert.equal(getAllRes.body.webhookSecret, undefined);
 
       // 5. Create a physical counter payment session (SUCCESS for a non-counter UPI
       // session is no longer reachable through counter confirmation).
@@ -696,7 +706,8 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(partialUpdate.status, 200);
       assert.equal(partialUpdate.body.businessName, 'Preserved Store LLC');
       assert.equal(partialUpdate.body.webhookUrl, receiverUrl);
-      assert.equal(partialUpdate.body.webhookSecret, customSecret);
+      assert.equal(partialUpdate.body.webhookSecretConfigured, true);
+      assert.equal(partialUpdate.body.webhookSecret, undefined);
 
     } finally {
       await new Promise(cb => mockReceiver.close(cb));
@@ -760,16 +771,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(checkBefore.body.status, PaymentStatus.ACTIVE);
 
       // 5. Channel 1: Google Messages SMS arrives while user is on QR screen (NO manual button click!)
-      const obs1 = await request('/api/v1/pollers/events', {
-        method: 'POST',
-        body: {
+      const obs1 = await signedPoller({
           source: 'GOOGLE_MESSAGES',
           receivingAccountId: '00000000-0000-0000-0000-000000000002',
           amount: '320.00',
           utr: 'UTR-NOCLICK-999',
           observedAt: new Date().toISOString()
-        }
-      });
+        });
       assert.equal(obs1.status, 200);
       assert.equal(obs1.body.attribution.attributed, true);
       assert.equal(obs1.body.attribution.verificationLevel, 1);
@@ -787,16 +795,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(webhookDeliveries.length, 0);
 
       // 6. Channel 2: Gmail credit notification for the SAME bank reference (UTR-NOCLICK-999)
-      const obs2 = await request('/api/v1/pollers/events', {
-        method: 'POST',
-        body: {
+      const obs2 = await signedPoller({
           source: 'GMAIL',
           receivingAccountId: '00000000-0000-0000-0000-000000000002',
           amount: '320.00',
           utr: 'UTR-NOCLICK-999',
           observedAt: new Date().toISOString()
-        }
-      });
+        });
       assert.equal(obs2.status, 200);
       assert.equal(obs2.body.attribution.verificationLevel, 2);
       assert.equal(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
@@ -816,16 +821,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(webhookDeliveries[0].body.amount, '320.00');
 
       // Invariant: A further observation of the same credit MUST NOT trigger a duplicate webhook!
-      const obs3 = await request('/api/v1/pollers/events', {
-        method: 'POST',
-        body: {
+      const obs3 = await signedPoller({
           source: 'SMS_GATEWAY',
           receivingAccountId: '00000000-0000-0000-0000-000000000002',
           amount: '320.00',
           utr: 'UTR-NOCLICK-999',
           observedAt: new Date().toISOString()
-        }
-      });
+        });
       assert.equal(obs3.status, 200);
       await new Promise(r => setTimeout(r, 150));
       assert.equal(webhookDeliveries.length, 1); // Exactly 1 delivery!

@@ -3,6 +3,7 @@ import { HttpServer } from '../server.js';
 import { PaymentStatus, PaymentMethod, SellingMode, AuditActorType, ConfirmationStatus, isValidVpa, toRupeesString, deriveCloudflareRoutes, resolveRuntimeUrls } from '@youpi/common';
 import { PaymentVerificationPipeline } from '@youpi/core';
 import { globalTunnelManager } from '../services/tunnel-manager.js';
+import { scrubSecretsFromLogLine } from '../services/api-auth.js';
 import { formatQrDataUrl } from '../services/whatsapp-berry.service.js';
 
 function resolveSellingModeAndMethods(body, currentBranding = {}) {
@@ -277,24 +278,91 @@ export function registerAdminRoutes(server, ctx) {
       return;
     }
 
-    // SUCCESS is only reachable through confirmPaymentSuccess(): physical counter
-    // sessions start ACTIVE and are confirmed by an operator at the till, while
-    // UPI sessions require independent bank-credit verification (audit P0-08).
+    // Authorization + proof requirements (audit P0-02/P1-01):
+    // - Physical cash/card counter sessions may be confirmed by an operator.
+    // - Digital UPI sessions may only be confirmed through authenticated manual
+    //   bank reconciliation carrying the bank reference as evidence; the ledger
+    //   then guarantees that reference can never credit a second order.
+    const isCounterSession = [PaymentMethod.CASH_COUNTER, PaymentMethod.CARD_COUNTER].includes(session.method);
+    const reconciliationRef = String(body.bankReferenceNumber || '').trim();
+    const reconciliationNote = String(body.reconciliationNote || '').trim();
+    const isReconciliation = Boolean(reconciliationRef && reconciliationNote);
+
+    if (!isCounterSession && !isReconciliation) {
+      HttpServer.json(res, 409, {
+        error: 'MANUAL_CONFIRMATION_NOT_ALLOWED',
+        method: session.method,
+        message: 'Counter confirmation is only permitted for cash/card counter sessions. A UPI session requires authenticated bank reconciliation with bankReferenceNumber and reconciliationNote.'
+      });
+      return;
+    }
+
+    // Independent bank evidence (audit P0-06): a reconciliation reference must
+    // already exist as an OBSERVED bank credit for this merchant/account, for
+    // exactly this amount — an operator typing a UTR is not evidence. The ledger
+    // row is then atomically consumed so one credit can never settle two orders.
+    let reconciliationLedgerId = null;
+    if (isReconciliation) {
+      const ledgerRow = ctx.db.queryOne(
+        'SELECT * FROM bank_transaction_ledger WHERE receiving_account_id = ? AND bank_reference = ?',
+        [session.receivingAccountId || '', reconciliationRef]
+      );
+
+      if (!ledgerRow || ledgerRow.merchant_id !== session.merchantId || Number(ledgerRow.amount_paise) !== Number(session.amountPaise)) {
+        HttpServer.json(res, 409, {
+          error: 'MANUAL_RECONCILIATION_UNVERIFIED',
+          message: 'No independently observed bank credit matches this reference for this receiving account and amount.'
+        });
+        return;
+      }
+
+      const reservation = ctx.sessionRepo.bankTxn
+        ? ctx.sessionRepo.bankTxn.reserve({
+          sessionId: paymentId,
+          receivingAccountId: session.receivingAccountId,
+          merchantId: session.merchantId,
+          bankReference: reconciliationRef,
+          amountPaise: session.amountPaise,
+          provenance: 'MANUAL_RECONCILIATION'
+        })
+        : { reserved: true };
+
+      if (!reservation.reserved) {
+        HttpServer.json(res, 409, {
+          error: 'MANUAL_RECONCILIATION_REJECTED',
+          reason: reservation.reason,
+          message: 'This bank reference cannot be credited to this order.'
+        });
+        return;
+      }
+      reconciliationLedgerId = reservation.rowId || ledgerRow.id;
+    }
+
+    // SUCCESS is only reachable through confirmPaymentSuccess() (audit P0-08).
     const { session: updated } = ctx.sessionRepo.confirmPaymentSuccess(paymentId, {
-      confirmationStatus: ConfirmationStatus.COUNTER_CONFIRMED,
+      confirmationStatus: isReconciliation ? ConfirmationStatus.MANUAL_RECONCILIATION : ConfirmationStatus.COUNTER_CONFIRMED,
       operatorId,
+      bankReferenceNumber: isReconciliation ? reconciliationRef : null,
       allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING],
-      confirmationNote: `Counter confirmation (${method || PaymentMethod.CASH_COUNTER}) by operator ${operatorId}`
+      confirmationNote: isReconciliation
+        ? `Bank reconciliation for reference ${reconciliationRef} by ${operatorId}: ${reconciliationNote}`
+        : `Counter confirmation (${method || PaymentMethod.CASH_COUNTER}) by operator ${operatorId}`
     });
 
     ctx.auditRepo.log({
       merchantId: session.merchantId,
       entityType: 'PAYMENT_SESSION',
       entityId: paymentId,
-      action: 'COUNTER_MANUAL_PAYMENT_CONFIRMED',
+      action: isReconciliation ? 'MANUAL_BANK_RECONCILIATION_CONFIRMED' : 'COUNTER_MANUAL_PAYMENT_CONFIRMED',
       actorType: AuditActorType.ADMIN,
       actorId: operatorId,
-      details: { method: method || PaymentMethod.CASH_COUNTER, operatorId }
+      details: {
+        method: method || session.method,
+        operatorId,
+        bankReferenceNumber: isReconciliation ? reconciliationRef : undefined,
+        reconciliationNote: isReconciliation ? reconciliationNote : undefined,
+        bankLedgerId: reconciliationLedgerId || undefined
+      }
     });
 
     server.broadcastSse(paymentId, 'status_change', {
@@ -338,6 +406,16 @@ export function registerAdminRoutes(server, ctx) {
     const session = ctx.sessionRepo.findById(paymentId);
     if (!session) {
       HttpServer.json(res, 404, { error: `Payment session not found: ${paymentId}` });
+      return;
+    }
+
+    // Declining is likewise restricted to physical counter sessions (P0-02).
+    if (![PaymentMethod.CASH_COUNTER, PaymentMethod.CARD_COUNTER].includes(session.method)) {
+      HttpServer.json(res, 409, {
+        error: 'MANUAL_DECLINE_NOT_ALLOWED',
+        method: session.method,
+        message: 'Counter decline is only permitted for cash/card counter sessions.'
+      });
       return;
     }
 
@@ -653,7 +731,8 @@ export function registerAdminRoutes(server, ctx) {
       upiId: account ? account.upiId : '',
       payeeName: account ? account.payeeName : merchant.businessName,
       webhookUrl: merchant.webhookUrl || '',
-      webhookSecret: merchant.webhookSecret || '',
+      // Secrets are never returned: presence is reported instead (audit P0-06).
+      webhookSecretConfigured: Boolean(merchant.webhookSecret),
       supportEmails,
       supportMobiles,
       privacyPolicyUrl,
@@ -792,7 +871,7 @@ export function registerAdminRoutes(server, ctx) {
       upiId: account ? account.upiId : '',
       payeeName: account ? account.payeeName : updated.businessName,
       webhookUrl: updated.webhookUrl || '',
-      webhookSecret: updated.webhookSecret || '',
+      webhookSecretConfigured: Boolean(updated.webhookSecret),
       supportEmails: updated.branding?.supportEmails || [],
       supportMobiles: updated.branding?.supportMobiles || [],
       privacyPolicyUrl: updated.branding?.privacyPolicyUrl || '',
@@ -829,8 +908,7 @@ export function registerAdminRoutes(server, ctx) {
     const cloudflareDomain = domainTld;
     const deploymentPrefix = domainPrefix;
     const customDomain = branding.customDomain || (cloudflareDomain ? `https://${deploymentPrefix}.${cloudflareDomain}` : '');
-    const cloudflareTunnelCommand = branding.cloudflareTunnelCommand || '';
-    const tunnelStatus = globalTunnelManager.getStatus();
+    const tunnelStatus = { ...globalTunnelManager.getStatus(), command: undefined };
 
     const routes = deriveCloudflareRoutes({ domain: cloudflareDomain, prefix: deploymentPrefix });
     let runtimeUrls = {};
@@ -850,7 +928,7 @@ export function registerAdminRoutes(server, ctx) {
       contactEmail: merchant.contactEmail,
       contactPhone: merchant.contactPhone,
       webhookUrl: merchant.webhookUrl,
-      webhookSecret: merchant.webhookSecret,
+      webhookSecretConfigured: Boolean(merchant.webhookSecret),
       supportEmails,
       supportMobiles,
       privacyPolicyUrl,
@@ -867,7 +945,7 @@ export function registerAdminRoutes(server, ctx) {
       customDomain,
       routes,
       runtimeUrls,
-      cloudflareTunnelCommand,
+      cloudflareTunnelCommandConfigured: Boolean(branding.cloudflareTunnelCommand),
       tunnelStatus,
       branding: {
         ...branding,
@@ -887,7 +965,7 @@ export function registerAdminRoutes(server, ctx) {
         customDomain,
         routes,
         runtimeUrls,
-        cloudflareTunnelCommand
+        cloudflareTunnelCommandConfigured: Boolean(branding.cloudflareTunnelCommand)
       }
     });
   });
@@ -1029,7 +1107,7 @@ export function registerAdminRoutes(server, ctx) {
       merchantId: updated.id,
       businessName: updated.businessName,
       webhookUrl: updated.webhookUrl || '',
-      webhookSecret: updated.webhookSecret || '',
+      webhookSecretConfigured: Boolean(updated.webhookSecret),
       supportEmails: updated.branding?.supportEmails || [],
       supportMobiles: updated.branding?.supportMobiles || [],
       privacyPolicyUrl: updated.branding?.privacyPolicyUrl || '',
@@ -1042,8 +1120,8 @@ export function registerAdminRoutes(server, ctx) {
       domainPrefix: updated.branding?.domainPrefix || 'pay',
       domainTld: updated.branding?.domainTld || '',
       customDomain: updated.branding?.customDomain || '',
-      cloudflareTunnelCommand: updated.branding?.cloudflareTunnelCommand || '',
-      tunnelStatus: globalTunnelManager.getStatus(),
+      cloudflareTunnelCommandConfigured: Boolean(updated.branding?.cloudflareTunnelCommand),
+      tunnelStatus: { ...globalTunnelManager.getStatus(), command: undefined },
       branding: updated.branding
     });
   });
@@ -1383,43 +1461,26 @@ export function registerAdminRoutes(server, ctx) {
     });
   });
 
-  // GET /api/v1/admin/tunnel/status - Status & logs of Cloudflare Tunnel
+  // GET /api/v1/admin/tunnel/status - Status of the operator-configured tunnel.
+  // The command line is never returned (it carries tunnel credentials) and log lines
+  // are scrubbed of tokens before leaving the process (audit P0-01/P0-06).
   server.get('/api/v1/admin/tunnel/status', async (req, res) => {
-    HttpServer.json(res, 200, globalTunnelManager.getStatus());
+    const status = globalTunnelManager.getStatus();
+    HttpServer.json(res, 200, {
+      ...status,
+      command: undefined,
+      commandConfigured: Boolean(status.command),
+      recentLogs: (status.recentLogs || []).map(entry => ({
+        ...entry,
+        text: scrubSecretsFromLogLine(entry.text)
+      }))
+    });
   });
 
-  // POST /api/v1/admin/tunnel/start - Start user-dropped Cloudflare Tunnel command
-  server.post('/api/v1/admin/tunnel/start', async (req, res) => {
-    const body = await HttpServer.parseBody(req).catch(() => ({}));
-    let command = body.command;
-
-    if (!command || !command.trim()) {
-      // Fallback to stored tunnel command in merchant branding
-      const merchant = resolveMerchant(req);
-      command = merchant?.branding?.cloudflareTunnelCommand;
-    }
-
-    if (!command || !command.trim()) {
-      HttpServer.json(res, 400, { error: 'Cloudflare Tunnel command cannot be empty. Please drop your command with token.' });
-      return;
-    }
-
-    try {
-      // Save command in merchant branding if provided
-      const merchant = resolveMerchant(req);
-      if (merchant && body.command) {
-        const currentBranding = merchant.branding || {};
-        ctx.merchantRepo.update(merchant.id, {
-          branding: { ...currentBranding, cloudflareTunnelCommand: command.trim() }
-        });
-      }
-
-      const status = globalTunnelManager.start(command);
-      HttpServer.json(res, 200, { success: true, ...status });
-    } catch (err) {
-      HttpServer.json(res, 500, { success: false, error: err.message });
-    }
-  });
+  // NOTE (audit P0-01): the `/api/v1/admin/tunnel/start` endpoint was REMOVED.
+  // It accepted operator/HTTP-supplied command text and executed it through a shell,
+  // which is remote command execution. Tunnels must now be started outside the
+  // application runtime with a pre-configured binary (see tunnel-manager.js).
 
   // POST /api/v1/admin/tunnel/stop - Stop running Cloudflare Tunnel
   server.post('/api/v1/admin/tunnel/stop', async (req, res) => {
@@ -1437,21 +1498,25 @@ export function registerAdminRoutes(server, ctx) {
     const redirectUri = 'https://pay-gmail.gauravtesting.online/oauth/callback';
     const hasToken = Boolean(gmailConfig.refreshToken && gmailConfig.refreshToken.trim());
 
+    // Secrets (client secret, refresh token, API key) are never returned: only
+    // configuration presence is reported (audit P0-06).
     HttpServer.json(res, 200, {
       gmailConfig: {
         clientId: gmailConfig.clientId || '',
-        clientSecret: gmailConfig.clientSecret || '',
         hasClientSecret: Boolean(gmailConfig.clientSecret),
-        refreshToken: gmailConfig.refreshToken || '',
-        apiKey: gmailConfig.apiKey || '',
+        clientSecretConfigured: Boolean(gmailConfig.clientSecret),
+        hasRefreshToken: Boolean(gmailConfig.refreshToken),
+        refreshTokenConfigured: Boolean(gmailConfig.refreshToken),
+        hasApiKey: Boolean(gmailConfig.apiKey),
         connectedEmail: gmailConfig.connectedEmail || null,
         lastTestedAt: gmailConfig.lastTestedAt || null
       },
       clientId: gmailConfig.clientId || '',
-      clientSecret: gmailConfig.clientSecret || '',
       hasClientSecret: Boolean(gmailConfig.clientSecret),
-      refreshToken: gmailConfig.refreshToken || '',
-      apiKey: gmailConfig.apiKey || '',
+      clientSecretConfigured: Boolean(gmailConfig.clientSecret),
+      hasRefreshToken: Boolean(gmailConfig.refreshToken),
+      refreshTokenConfigured: Boolean(gmailConfig.refreshToken),
+      hasApiKey: Boolean(gmailConfig.apiKey),
       connectedEmail: gmailConfig.connectedEmail || null,
       redirectUri,
       oauthStatus: hasToken ? 'CONNECTED' : 'DISCONNECTED',

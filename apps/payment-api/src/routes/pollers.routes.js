@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpServer } from '../server.js';
 import { ObservationNormalizer, BankSmsParser, BankEmailParser, generateQrSvg } from '@youpi/core';
-import { toRupeesString, toPaise, verifyHmac, resolveRuntimeUrls } from '@youpi/common';
+import { toRupeesString, toPaise, resolveRuntimeUrls, ObserverSource } from '@youpi/common';
+import { issuePairingToken, redeemPairingToken } from '../services/api-auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -23,17 +24,26 @@ const __dirname = path.dirname(__filename);
  * }} ctx
  */
 export function registerPollerRoutes(server, ctx) {
-  const enrollmentSecret = process.env.ANDROID_ENROLLMENT_SECRET || 'android_pairing_enrollment_secret_key_32_chars';
+  /**
+   * Tenant scope for observer intake. The merchant is derived from the SIGNED
+   * credential (attached by the request guard), never from the request body
+   * (audit P0-03/P0-07).
+   */
+  const observerMerchantId = req => req.auth?.merchantId || null;
 
   // GET /api/v1/pollers/active-window (Enables deep intelligent DOM scanning for active amounts and dual-layer verification)
+  // Signed observer credential required (guard); scoped to the authenticated merchant.
   server.get('/api/v1/pollers/active-window', async (req, res) => {
+    const merchantId = observerMerchantId(req);
     const activeSessions = ctx.db.query(`
-      SELECT id, order_id, receiving_account_id, amount_paise, status, verification_level, expires_at, processing_expires_at, completed_at
-      FROM payment_sessions
-      WHERE status IN ('ACTIVE', 'PROCESSING')
-         OR (status = 'SUCCESS' AND verification_level < 2 AND completed_at >= datetime('now', '-60 seconds'))
-      ORDER BY created_at DESC
-    `);
+      SELECT ps.id, ps.order_id, ps.receiving_account_id, ps.amount_paise, ps.status, ps.verification_level, ps.expires_at, ps.processing_expires_at, ps.completed_at
+      FROM payment_sessions ps
+      LEFT JOIN payment_receiving_accounts ra ON ps.receiving_account_id = ra.id
+      WHERE (ps.status IN ('ACTIVE', 'PROCESSING')
+         OR (ps.status = 'SUCCESS' AND ps.verification_level < 2 AND ps.completed_at >= datetime('now', '-60 seconds')))
+        AND (? IS NULL OR ps.merchant_id = ?)
+      ORDER BY ps.created_at DESC
+    `, [merchantId, merchantId]);
 
     const sessions = activeSessions.map(s => ({
       id: s.id,
@@ -54,13 +64,51 @@ export function registerPollerRoutes(server, ctx) {
   });
 
   // POST /api/v1/pollers/events (Universal Observation Ingest for Gmail / SMS 2-Layer Observers)
+  // The request guard has already verified the HMAC signature and derived the
+  // merchant from the credential. Tenant and account identity are resolved here
+  // server-side; body claims are only advisory and cross-tenant values are refused.
   server.post('/api/v1/pollers/events', async (req, res) => {
     const body = await HttpServer.parseBody(req);
+    const merchantId = observerMerchantId(req);
 
-    if (!body.receivingAccountId || !body.source) {
-      HttpServer.json(res, 400, { error: 'Missing required fields: receivingAccountId and source.' });
+    if (!merchantId) {
+      HttpServer.json(res, 401, { error: 'UNAUTHORIZED', message: 'Observer credential required.' });
       return;
     }
+
+    if (!body.source || !Object.values(ObserverSource).includes(body.source)) {
+      HttpServer.json(res, 400, { error: 'Missing or invalid observation source.' });
+      return;
+    }
+
+    const authorizedAccount = ctx.accountRepo
+      ? ctx.accountRepo.findActiveForMerchant(merchantId)
+      : ctx.db.queryOne('SELECT id FROM payment_receiving_accounts WHERE merchant_id = ? AND is_active = 1 LIMIT 1', [merchantId]);
+    const merchantAccounts = ctx.db.query(
+      'SELECT id FROM payment_receiving_accounts WHERE merchant_id = ?',
+      [merchantId]
+    ).map(r => r.id);
+
+    let receivingAccountId = body.receivingAccountId;
+    if (receivingAccountId && merchantAccounts.length > 0 && !merchantAccounts.includes(receivingAccountId)) {
+      HttpServer.json(res, 403, {
+        error: 'FORBIDDEN',
+        reason: 'CROSS_TENANT_ACCOUNT',
+        message: 'The authenticated observer may not submit observations for this receiving account.'
+      });
+      return;
+    }
+    if (!receivingAccountId) {
+      receivingAccountId = authorizedAccount?.id || null;
+    }
+    if (!receivingAccountId) {
+      HttpServer.json(res, 400, { error: 'No receiving account is bound to the authenticated observer.' });
+      return;
+    }
+
+    // Re-scope the request to the verified tenant before evaluation.
+    body.receivingAccountId = receivingAccountId;
+    req.body = body;
 
     // Evaluate through Security & Fraud Verification Pipeline
     const rawText = body.rawText || body.text || body.message || body.sms || body.body || (typeof body.rawPayload === 'string' ? body.rawPayload : (body.rawPayload?.text || body.rawPayload?.body));
@@ -71,8 +119,9 @@ export function registerPollerRoutes(server, ctx) {
         source: body.source,
         rawText,
         sender,
-        receivingAccountId: body.receivingAccountId,
+        receivingAccountId,
         paymentSessionId: body.paymentSessionId,
+        merchantId,
         isTest: Boolean(body.isTest),
         testModeActive: Boolean(body.testModeActive)
       });
@@ -120,7 +169,7 @@ export function registerPollerRoutes(server, ctx) {
 
       const normalized = ObservationNormalizer.normalize({
         source: body.source,
-        receivingAccountId: body.receivingAccountId,
+        receivingAccountId,
         rawPayload: body.rawPayload || body,
         amountPaise,
         amount: body.amount || (amountPaise ? (Number(amountPaise) / 100).toFixed(2) : undefined),
@@ -143,28 +192,24 @@ export function registerPollerRoutes(server, ctx) {
   });
 
   // --- ANDROID SMS GATEWAY PAIRING HANDLER ---
+  // Enrollment requires a short-lived SINGLE-USE pairing challenge issued by the
+  // authenticated admin (audit P0-05): no static secret, no merchant-ID-derived
+  // token, and the tenant is taken from the stored challenge rather than the body.
   const handleAndroidPair = async (req, res) => {
     const body = await HttpServer.parseBody(req);
     const token = body.enrollmentToken || body.token;
-    const merchantId = body.merchantId || '00000000-0000-0000-0000-000000000001';
     const deviceName = body.deviceName || 'Android SMS Gateway';
     const deviceModel = body.deviceModel || 'Android Device';
 
-    // Verify enrollment token against system secret or merchant token
-    if (!token || (token !== enrollmentSecret && token !== `pair_${merchantId.slice(0, 8)}` && token !== 'youpi_sms_pair_token_secure')) {
-      HttpServer.json(res, 401, { error: 'Invalid or expired device pairing enrollment token.' });
+    const redemption = redeemPairingToken(ctx, token);
+    if (!redemption.ok) {
+      HttpServer.json(res, 401, {
+        error: 'Invalid, expired, or already used device pairing token.',
+        reason: redemption.code
+      });
       return;
     }
-
-    if (body.expiresAt && Date.now() > Number(body.expiresAt)) {
-      HttpServer.json(res, 400, { error: 'PAIRING QR EXPIRED' });
-      return;
-    }
-
-    if (body.version && body.version !== 'v1') {
-      HttpServer.json(res, 400, { error: 'INVALID YOUPI PAIRING QR' });
-      return;
-    }
+    const merchantId = redemption.merchantId;
 
     const deviceId = crypto.randomUUID();
     const signingKey = crypto.randomBytes(32).toString('hex');
@@ -203,61 +248,57 @@ export function registerPollerRoutes(server, ctx) {
   server.post('/api/v1/observers/sms/pair', handleAndroidPair);
 
   // --- ANDROID SMS GATEWAY OBSERVATION INGESTION ---
+  // Signature, timestamp window and nonce replay protection are ENFORCED by the
+  // request guard before this handler runs (audit P0-04). The device record and
+  // therefore the merchant/account scope come from the authenticated device.
   const handleAndroidSmsEvents = async (req, res) => {
-    const rawBodyText = await new Promise(resolve => {
-      let data = '';
-      req.on('data', chunk => { data += chunk; });
-      req.on('end', () => resolve(data));
-    });
+    const rawBodyText = typeof req.rawBody === 'string'
+      ? req.rawBody
+      : await new Promise(resolve => {
+        let data = '';
+        req.on('data', chunk => { data += chunk; });
+        req.on('end', () => resolve(data));
+      });
 
     let body = {};
     try {
-      body = JSON.parse(rawBodyText);
+      body = rawBodyText ? JSON.parse(rawBodyText) : {};
     } catch {
       HttpServer.json(res, 400, { error: 'Invalid JSON payload.' });
       return;
     }
 
-    const deviceId = req.headers['x-device-id'] || body.deviceId;
-    if (!deviceId) {
-      HttpServer.json(res, 400, { error: 'Missing required X-Device-Id header or deviceId.' });
-      return;
-    }
-
-    // Verify registered device
-    const device = ctx.db.queryOne('SELECT * FROM android_devices WHERE id = ? AND is_active = 1', [deviceId]);
+    const device = req.auth?.device || ctx.db.queryOne('SELECT * FROM android_devices WHERE id = ? AND is_active = 1', [req.auth?.deviceId || '']);
     if (!device) {
       HttpServer.json(res, 403, { error: 'Device not authorized or inactive.' });
       return;
     }
+    const deviceId = device.id;
 
-    // Verify HMAC Signature & Replay Drift Protection if headers are present
-    const timestampStr = req.headers['x-timestamp'];
-    const signature = req.headers['x-signature'];
+    // Resolve the receiving account STRICTLY inside the device's own merchant.
+    const merchantAccounts = ctx.db.query(
+      'SELECT id FROM payment_receiving_accounts WHERE merchant_id = ?',
+      [device.merchant_id]
+    ).map(r => r.id);
 
-    if (timestampStr && signature && device.signing_key_hash) {
-      const ts = Number(timestampStr);
-      const now = Date.now();
-      if (isNaN(ts) || Math.abs(now - ts) > 60000) {
-        HttpServer.json(res, 401, { error: 'Timestamp drift exceeded validity window (replay protection triggered).' });
-        return;
-      }
-
-      const sigPayload = `${rawBodyText}:${timestampStr}`;
-      const isValid = verifyHmac(sigPayload, device.signing_key_hash, signature);
-      if (!isValid) {
-        HttpServer.json(res, 401, { error: 'Invalid cryptographic HMAC signature.' });
-        return;
-      }
-    }
-
-    // Resolve Receiving Account for this merchant
     let receivingAccountId = body.receivingAccountId;
+    if (receivingAccountId && merchantAccounts.length > 0 && !merchantAccounts.includes(receivingAccountId)) {
+      HttpServer.json(res, 403, {
+        error: 'FORBIDDEN',
+        reason: 'CROSS_TENANT_ACCOUNT',
+        message: 'The authenticated device may not submit observations for this receiving account.'
+      });
+      return;
+    }
     if (!receivingAccountId) {
       const activeAccount = ctx.accountRepo
         ? ctx.accountRepo.findActiveForMerchant(device.merchant_id)
         : ctx.db.queryOne('SELECT id FROM payment_receiving_accounts WHERE merchant_id = ? AND is_active = 1 LIMIT 1', [device.merchant_id]);
-      receivingAccountId = activeAccount?.id || '00000000-0000-0000-0000-000000000002';
+      receivingAccountId = activeAccount?.id || merchantAccounts[0] || null;
+    }
+    if (!receivingAccountId) {
+      HttpServer.json(res, 400, { error: 'No receiving account is bound to this device merchant.' });
+      return;
     }
 
     // Extract amount and details: either pre-parsed or from raw bank SMS
@@ -370,13 +411,16 @@ export function registerPollerRoutes(server, ctx) {
   server.post('/api/v1/observers/sms', handleAndroidSmsEvents);
 
   // --- ANDROID HEARTBEAT HANDLER ---
+  // Heartbeats are signed like observations (guard-enforced) and may only update
+  // the authenticated device's own row.
   const handleAndroidHeartbeat = async (req, res) => {
-    const body = await HttpServer.parseBody(req);
-    const deviceId = req.headers['x-device-id'] || body.deviceId;
-
-    if (deviceId) {
-      ctx.db.execute('UPDATE android_devices SET last_heartbeat_at = datetime(\'now\') WHERE id = ?', [deviceId]);
+    const deviceId = req.auth?.deviceId;
+    if (!deviceId) {
+      HttpServer.json(res, 401, { error: 'UNAUTHORIZED', message: 'Signed device request required.' });
+      return;
     }
+
+    ctx.db.execute("UPDATE android_devices SET last_heartbeat_at = datetime('now') WHERE id = ?", [deviceId]);
 
     HttpServer.json(res, 200, {
       status: 'HEARTBEAT_ACK',
@@ -390,16 +434,29 @@ export function registerPollerRoutes(server, ctx) {
 
   // --- MERCHANT ADMIN: SMS GATEWAY PAIRING QR CODE & STATUS ---
   server.get('/api/v1/admin/sms-gateway/pair-qr', async (req, res) => {
-    let merchant = req.query.merchantId ? (ctx.merchantRepo ? ctx.merchantRepo.findById(req.query.merchantId) : null) : null;
+    // Tenant comes from the credential (audit P0-03/P0-07): a merchant-role
+    // credential can only enroll devices into its OWN merchant.
+    const credentialMerchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : null;
+    if (credentialMerchantId && req.query.merchantId && req.query.merchantId !== credentialMerchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant pairing refused.' });
+      return;
+    }
+
+    let merchant = credentialMerchantId
+      ? (ctx.merchantRepo ? ctx.merchantRepo.findById(credentialMerchantId) : null)
+      : null;
+    if (!merchant && req.query.merchantId) merchant = ctx.merchantRepo ? ctx.merchantRepo.findById(req.query.merchantId) : null;
     if (!merchant && ctx.merchantRepo) merchant = ctx.merchantRepo.getDefault ? ctx.merchantRepo.getDefault() : (ctx.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || ctx.merchantRepo.findAll()[0]);
-    const merchantId = merchant ? merchant.id : (req.query.merchantId || '00000000-0000-0000-0000-000000000001');
+    const merchantId = credentialMerchantId || (merchant ? merchant.id : (req.query.merchantId || '00000000-0000-0000-0000-000000000001'));
 
     // Canonical runtime URL derivation (Part C2)
     const runtime = resolveRuntimeUrls(merchant?.branding || {});
     const baseUrl = runtime.apiUrl;
-    const token = enrollmentSecret;
+    // Single-use, short-lived pairing challenge (only its hash is persisted).
+    const pairing = issuePairingToken(ctx, merchantId);
+    const token = pairing.token;
     const sessionId = crypto.randomUUID();
-    const expiresAt = Date.now() + (10 * 60 * 1000); // 10 minutes
+    const expiresAt = new Date(pairing.expiresAt).getTime();
 
     const pairingPayloadObj = {
       version: 'v1',
@@ -421,7 +478,7 @@ export function registerPollerRoutes(server, ctx) {
     const rawDevices = ctx.db.query(`
       SELECT id, device_name, device_model, is_active, last_heartbeat_at, last_observation_at, created_at
       FROM android_devices
-      WHERE merchant_id = ? OR merchant_id = '00000000-0000-0000-0000-000000000001'
+      WHERE merchant_id = ?
       ORDER BY created_at DESC
     `, [merchantId]);
 
@@ -440,7 +497,9 @@ export function registerPollerRoutes(server, ctx) {
       last_observation_at: d.last_observation_at,
       createdAt: d.created_at,
       created_at: d.created_at,
-      pairedAt: d.created_at
+      pairedAt: d.created_at,
+      // Device signing keys are never returned in any form (audit P0-05/P0-06).
+      signingKeyConfigured: Boolean(d.signing_key_hash)
     }));
 
     HttpServer.json(res, 200, {
@@ -461,14 +520,22 @@ export function registerPollerRoutes(server, ctx) {
 
   // GET /api/v1/admin/sms-gateway/devices
   server.get('/api/v1/admin/sms-gateway/devices', async (req, res) => {
-    let merchant = req.query.merchantId ? (ctx.merchantRepo ? ctx.merchantRepo.findById(req.query.merchantId) : null) : null;
+    // Tenant comes from the credential (audit P0-07): a merchant-role credential
+    // may only list its own devices.
+    const credentialMerchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : null;
+    if (credentialMerchantId && req.query.merchantId && req.query.merchantId !== credentialMerchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant device listing refused.' });
+      return;
+    }
+    let merchant = credentialMerchantId ? (ctx.merchantRepo ? ctx.merchantRepo.findById(credentialMerchantId) : null) : null;
+    if (!merchant && req.query.merchantId) merchant = ctx.merchantRepo ? ctx.merchantRepo.findById(req.query.merchantId) : null;
     if (!merchant && ctx.merchantRepo) merchant = ctx.merchantRepo.getDefault ? ctx.merchantRepo.getDefault() : (ctx.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || ctx.merchantRepo.findAll()[0]);
-    const merchantId = merchant ? merchant.id : (req.query.merchantId || '00000000-0000-0000-0000-000000000001');
+    const merchantId = credentialMerchantId || (merchant ? merchant.id : (req.query.merchantId || '00000000-0000-0000-0000-000000000001'));
 
     const rawDevices = ctx.db.query(`
       SELECT id, device_name, device_model, is_active, last_heartbeat_at, last_observation_at, created_at
       FROM android_devices
-      WHERE merchant_id = ? OR merchant_id = '00000000-0000-0000-0000-000000000001'
+      WHERE merchant_id = ?
       ORDER BY created_at DESC
     `, [merchantId]);
 

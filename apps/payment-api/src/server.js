@@ -116,15 +116,24 @@ export class HttpServer {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature'
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature, X-Admin-Key, X-API-Key, X-Observer-Key, X-Observer-Timestamp, X-Observer-Nonce, X-Observer-Signature'
     });
     res.end(jsonStr);
   }
 
   /**
-   * Parses JSON body from request.
+   * Parses JSON body from request. Honours an already-buffered raw body captured by
+   * the request guard (signature verification must see the exact request bytes).
    */
   static async parseBody(req) {
+    if (typeof req.rawBody === 'string') {
+      if (!req.rawBody.trim()) return {};
+      try {
+        return JSON.parse(req.rawBody);
+      } catch {
+        throw new Error('Malformed JSON body');
+      }
+    }
     return new Promise((resolve, reject) => {
       let body = '';
       req.on('data', chunk => {
@@ -151,6 +160,16 @@ export class HttpServer {
   /**
    * Creates native HTTP server.
    */
+  /**
+   * Installs a request guard, invoked before route dispatch. The guard may buffer
+   * the raw body onto req.rawBody (required for HMAC verification) and returns
+   * false after having written its own error response.
+   * @param {(req: any, res: any, pathname: string, method: string) => Promise<boolean>|boolean} guard
+   */
+  setRequestGuard(guard) {
+    this.requestGuard = guard;
+  }
+
   createServer() {
     return http.createServer(async (req, res) => {
       // Handle CORS preflight
@@ -158,7 +177,7 @@ export class HttpServer {
         res.writeHead(204, {
           'Access-Control-Allow-Origin': '*',
           'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature'
+          'Access-Control-Allow-Headers': 'Content-Type, Authorization, Idempotency-Key, X-Device-Id, X-Timestamp, X-Signature, X-Admin-Key, X-API-Key, X-Observer-Key, X-Observer-Timestamp, X-Observer-Nonce, X-Observer-Signature'
         });
         res.end();
         return;
@@ -167,6 +186,20 @@ export class HttpServer {
       const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
       const pathname = parsedUrl.pathname;
       const method = req.method.toUpperCase();
+      req._youpiPath = pathname;
+      req.query = Object.fromEntries(parsedUrl.searchParams.entries());
+
+      // Server-enforced authentication/authorization runs BEFORE any route handler.
+      if (this.requestGuard) {
+        try {
+          const allowed = await this.requestGuard(req, res, pathname, method);
+          if (allowed === false) return;
+        } catch (err) {
+          console.error(`[RequestGuard] ${method} ${pathname}:`, err.message);
+          HttpServer.json(res, 401, { error: 'UNAUTHORIZED', message: 'Request rejected by security guard.' });
+          return;
+        }
+      }
 
       for (const route of this.routes) {
         if (route.method === method) {
@@ -176,8 +209,6 @@ export class HttpServer {
             route.paramNames.forEach((name, index) => {
               params[name] = match[index + 1];
             });
-
-            req.query = Object.fromEntries(parsedUrl.searchParams.entries());
 
             try {
               await route.handler(req, res, params);

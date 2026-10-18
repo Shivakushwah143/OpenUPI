@@ -31,8 +31,11 @@ export function registerPaymentRoutes(server, ctx) {
     const body = await HttpServer.parseBody(req);
     const idempotencyKey = req.headers['idempotency-key'] || body.idempotencyKey;
 
-    // Resolve merchant (default to first/demo merchant if none passed in header)
-    const merchantId = req.headers['x-merchant-id'] || body.merchantId;
+    // Resolve merchant. A merchant-role credential (attached by the request guard)
+    // pins the tenant: caller-supplied IDs can never select another merchant
+    // (audit P0-07).
+    const credentialMerchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : null;
+    const merchantId = credentialMerchantId || req.headers['x-merchant-id'] || body.merchantId;
     let merchant;
     if (merchantId) {
       merchant = ctx.merchantRepo.findById(merchantId);
@@ -42,6 +45,11 @@ export function registerPaymentRoutes(server, ctx) {
 
     if (!merchant) {
       HttpServer.json(res, 400, { error: 'Merchant not found or not configured.' });
+      return;
+    }
+
+    if (credentialMerchantId && merchant.id !== credentialMerchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant payment creation refused.' });
       return;
     }
 
