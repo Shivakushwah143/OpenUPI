@@ -62,7 +62,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(btnPermission)
 
         etBaseUrl = EditText(this).apply {
-            hint = "Gateway URL (e.g. http://192.168.1.100:6100)"
+            hint = "Gateway URL (e.g. https://pay.example.com)"
             setText(apiClient.getBaseUrl())
         }
         layout.addView(etBaseUrl)

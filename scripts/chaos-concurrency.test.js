@@ -184,12 +184,24 @@ describe('Phase 16: Comprehensive Chaos & Concurrency Verification', () => {
 
     const resGmail = attributionEngine.processObservation(obsGmail);
 
-    // The second, INDEPENDENT channel reports the SAME bank reference -> the credit
-    // is independently verified and the payment succeeds exactly once.
+    // The second, INDEPENDENT channel reports the SAME bank reference: the credit is
+    // corroborated (evidence), which never settles a payment by itself.
     assert.equal(resGmail.attributed, true);
-    assert.equal(resGmail.outcomeStatus, PaymentStatus.SUCCESS);
-    assert.equal(resGmail.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
     assert.equal(resGmail.verificationLevel, 2);
+    assert.notEqual(sessionRepo.findById(activeSession.id).status, PaymentStatus.SUCCESS);
+
+    // Only an authenticated bank/acquirer confirmation settles the payment.
+    const bankConfirmed = attributionEngine.confirmAuthoritativeBankCredit({
+      receivingAccountId: testAccount.id,
+      merchantId: defaultMerchant.id,
+      bankReferenceNumber: utr,
+      amountPaise: 20000n,
+      source: 'ACQUIRER',
+      confirmedBy: 'chaos-acquirer'
+    });
+    assert.equal(bankConfirmed.confirmed, true);
+    assert.equal(sessionRepo.findById(activeSession.id).status, PaymentStatus.SUCCESS);
+    assert.equal(sessionRepo.findById(activeSession.id).confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
 
     // Redundant duplicate from the same source (SMS again) is safely ignored!
     const resSmsDup = attributionEngine.processObservation(obsSms);

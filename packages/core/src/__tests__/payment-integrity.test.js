@@ -127,7 +127,7 @@ describe('Attribution Integrity: tenant isolation & bank-credit verification', (
       assert.equal(emittedEvents.filter(e => e.event === 'PAYMENT.REPORTED').length, 1);
     });
 
-    test('two independent channels reporting the SAME bank reference confirm the payment once', () => {
+    test('two independent channels reporting the SAME bank reference corroborate, but only an authenticated bank confirmation settles the payment', () => {
       const session = activeSession(merchantA, accountA, 'ORD-CORROBORATED', 49900n);
 
       const smsResult = engine.processObservation(observation({
@@ -145,9 +145,21 @@ describe('Attribution Integrity: tenant isolation & bank-credit verification', (
         bankReferenceNumber: 'UTR-CORROB-1'
       }));
 
+      // Corroboration on two independent channels is evidence, not settlement.
       assert.equal(emailResult.attributed, true);
-      assert.equal(emailResult.outcomeStatus, PaymentStatus.SUCCESS);
-      assert.equal(emailResult.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
+      assert.notEqual(sessionRepo.findById(session.id).status, PaymentStatus.SUCCESS);
+      assert.equal(emittedEvents.filter(e => e.event === 'PAYMENT.SUCCESS').length, 0);
+
+      // The authenticated bank/acquirer confirmation is what settles it.
+      const bankResult = engine.confirmAuthoritativeBankCredit({
+        receivingAccountId: accountA.id,
+        merchantId: merchantA.id,
+        bankReferenceNumber: 'UTR-CORROB-1',
+        amountPaise: 49900n,
+        source: 'ACQUIRER',
+        confirmedBy: 'acquirer-integrity-test'
+      });
+      assert.equal(bankResult.confirmed, true);
 
       const confirmed = sessionRepo.findById(session.id);
       assert.equal(confirmed.status, PaymentStatus.SUCCESS);
@@ -230,13 +242,24 @@ describe('Attribution Integrity: tenant isolation & bank-credit verification', (
         amountPaise: 19900n,
         bankReferenceNumber: 'UTR-REPLAY-1'
       }));
-      const confirmedA = engine.processObservation(observation({
+      engine.processObservation(observation({
         accountId: accountA.id,
         source: ObserverSource.GMAIL,
         amountPaise: 19900n,
         bankReferenceNumber: 'UTR-REPLAY-1'
       }));
-      assert.equal(confirmedA.outcomeStatus, PaymentStatus.SUCCESS);
+      // Two channels corroborated the credit; the authenticated bank confirmation
+      // is what settles order A.
+      const bankResult = engine.confirmAuthoritativeBankCredit({
+        receivingAccountId: accountA.id,
+        merchantId: merchantA.id,
+        bankReferenceNumber: 'UTR-REPLAY-1',
+        amountPaise: 19900n,
+        source: 'ACQUIRER',
+        confirmedBy: 'acquirer-replay-test'
+      });
+      assert.equal(bankResult.confirmed, true);
+      assert.equal(bankResult.sessionId, orderA.id);
       assert.equal(sessionRepo.findById(orderA.id).status, PaymentStatus.SUCCESS);
 
       // The same credit offered again resolves to the SAME already-confirmed order

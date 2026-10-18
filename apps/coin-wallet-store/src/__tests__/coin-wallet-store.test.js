@@ -27,7 +27,9 @@ describe('Coin Top-Up Wallet Demo Store Integration Tests', () => {
     storeInstance = await startCoinWalletStore(5099, {
       gatewayApiUrl: `http://localhost:${apiInstance.port}`,
       merchantId: '00000000-0000-0000-0000-000000000001',
-      webhookSecret: storeSecret
+      webhookSecret: storeSecret,
+      // Merchant service credential: payment creation fails closed without it.
+      apiKey: process.env.TEST_MERCHANT_API_KEY || 'test_merchant_api_key_123'
     });
 
     storeBaseUrl = `http://localhost:${storeInstance.port}`;

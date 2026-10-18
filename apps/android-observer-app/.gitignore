@@ -1,0 +1,10 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+local.properties
+
+# Signing material must never be committed (pass via -P or env instead)
+*.jks
+*.keystore
+keystore.properties

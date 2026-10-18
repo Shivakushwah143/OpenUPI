@@ -140,10 +140,18 @@ export function registerPollerRoutes(server, ctx) {
       }
 
       if (pipeResult.status === 'VERIFIED') {
+        const stage6 = pipeResult.stages?.stage6?.details || {};
         HttpServer.json(res, 200, {
           accepted: true,
-          observationId: pipeResult.messageId || pipeResult.stages?.stage6?.details?.observationId,
-          attribution: pipeResult.stages?.stage6?.details || pipeResult,
+          observationId: pipeResult.messageId || stage6.observationId,
+          // Keep the ingest response contract identical to the legacy path:
+          // clients key on `attributed` / `paymentSessionId`, not on the stage dump.
+          attribution: {
+            attributed: true,
+            ...stage6,
+            paymentSessionId: stage6.attributedSessionId,
+            outcomeStatus: pipeResult.stages?.stage6?.outcomeStatus || stage6.outcomeStatus
+          },
           pipeline: pipeResult
         });
         return;
@@ -216,6 +224,13 @@ export function registerPollerRoutes(server, ctx) {
     const signingKey = crypto.randomBytes(32).toString('hex');
     const nowIso = new Date().toISOString();
 
+    // Pin the device to the receiving account it observes, so later observations
+    // are attributed to the account whose QR this merchant actually shows rather
+    // than to "whichever account is active" at ingest time.
+    const pairedAccount = ctx.accountRepo
+      ? ctx.accountRepo.findActiveForMerchant(merchantId)
+      : ctx.db.queryOne('SELECT id FROM payment_receiving_accounts WHERE merchant_id = ? AND is_active = 1 LIMIT 1', [merchantId]);
+
     try {
       // The device signing key is sealed at rest; the plaintext is returned to the
       // device exactly once, during pairing (observer/device secret hardening).
@@ -240,6 +255,7 @@ export function registerPollerRoutes(server, ctx) {
         deviceId,
         signingKey,
         merchantId,
+        receivingAccountId: pairedAccount?.id || null,
         message: 'Android SMS Gateway paired successfully.'
       });
     } catch (err) {
@@ -340,6 +356,9 @@ export function registerPollerRoutes(server, ctx) {
         sender: body.sender || req.headers['x-sender'],
         receivingAccountId,
         paymentSessionId: body.paymentSessionId,
+        // Tenant scope comes from the authenticated device; the pipeline refuses
+        // to bind a body-supplied session belonging to another merchant.
+        merchantId: device.merchant_id,
         isTest: Boolean(body.isTest),
         deviceInfo: device ? `${device.device_name} (${device.device_model})` : 'Android SMS Gateway'
       });
@@ -358,10 +377,16 @@ export function registerPollerRoutes(server, ctx) {
 
       if (pipeResult.status === 'VERIFIED') {
         ctx.db.execute("UPDATE android_devices SET last_observation_at = datetime('now') WHERE id = ?", [deviceId]);
+        const stage6 = pipeResult.stages?.stage6?.details || {};
         HttpServer.json(res, 200, {
           accepted: true,
-          observationId: pipeResult.messageId || pipeResult.stages?.stage6?.details?.observationId,
-          attribution: pipeResult.stages?.stage6?.details || pipeResult,
+          observationId: pipeResult.messageId || stage6.observationId,
+          attribution: {
+            attributed: true,
+            ...stage6,
+            paymentSessionId: stage6.attributedSessionId,
+            outcomeStatus: pipeResult.stages?.stage6?.outcomeStatus || stage6.outcomeStatus
+          },
           pipeline: pipeResult
         });
         return;

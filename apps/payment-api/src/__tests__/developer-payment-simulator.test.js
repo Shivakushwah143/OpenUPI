@@ -4,6 +4,21 @@ import http from 'node:http';
 import { Database, CustomerRepository, CustomerSessionRepository, PaymentSessionRepository, MerchantRepository } from '@youpi/db';
 import { startServer as startPaymentApi } from '../index.js';
 
+// --- Test-harness credentials -------------------------------------------------
+// The gateway now FAILS CLOSED: administrative and payment-management endpoints
+// require a server-configured credential. Tests authenticate explicitly with the
+// harness operator credential instead of relying on a removed dev fallback.
+process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const AUTH_HEADERS = { 'X-Admin-Key': process.env.ADMIN_API_KEY };
+/** fetch with the harness operator credential merged into the headers. */
+const authFetch = (url, options = {}) => globalThis.fetch(url, {
+  ...options,
+  headers: { ...AUTH_HEADERS, ...(options.headers || {}) }
+});
+// ------------------------------------------------------------------------------
+
+
 describe('Feature 65: Developer Payment Simulator Integration & Acceptance Suite', () => {
   let apiInstance;
   let baseUrl;
@@ -44,6 +59,7 @@ describe('Feature 65: Developer Payment Simulator Integration & Acceptance Suite
       const url = new URL(path, baseUrl);
       const headers = {
         'Content-Type': 'application/json',
+        ...AUTH_HEADERS,
         ...(options.headers || {})
       };
       if (options.merchantAuth !== false && !headers['x-merchant-id']) {

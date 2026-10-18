@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { signObserverRequest } from '@youpi/common';
+import { signObserverRequest, parseObserverCredential } from '@youpi/common';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BrowserLauncher } from '@youpi/observer-sdk';
@@ -20,7 +20,8 @@ export class GmailBrowserAutomator {
     this.gmailPoller = options.gmailPoller;
     this.apiBaseUrl = options.apiBaseUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100';
     // Signed observer credential: required for active-window / ingest calls (audit P0-03).
-    this.observerKey = options.observerKey || process.env.YOUPI_OBSERVER_KEY || process.env.YOUPI_MERCHANT_API_KEY || '';
+    // Dedicated observer credential (`<keyId>.<secret>`), separate from the merchant/admin API key.
+    this.observerCredential = options.observerCredential || process.env.YOUPI_OBSERVER_CREDENTIAL || '';
     this.debuggingPort = options.debuggingPort || 9223;
     this.profileDir = path.join(rootDir, 'data/browser-sessions/gmail');
     this.stateFilePath = path.join(this.profileDir, 'login-state.json');
@@ -43,8 +44,8 @@ export class GmailBrowserAutomator {
   async fetchActivePaymentAmounts() {
     try {
       const res = await fetch(`${this.apiBaseUrl}/api/v1/pollers/active-window`, {
-        headers: this.observerKey
-          ? signObserverRequest({ secret: this.observerKey, method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
+        headers: this.observerCredential
+          ? signObserverRequest({ ...parseObserverCredential(this.observerCredential), method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
           : {},
         signal: AbortSignal.timeout(1500)
       });

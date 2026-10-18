@@ -20,6 +20,7 @@ export class AttributionEngine {
     this.sessionRepo = options.sessionRepo;
     this.obsRepo = options.obsRepo;
     this.ticketRepo = options.ticketRepo;
+    this.reviewRepo = options.reviewRepo;
     this.auditRepo = options.auditRepo;
     this.eventEmitter = options.eventEmitter || { emit: () => {} };
     const isTestExecution = process.env.NODE_ENV === 'test' ||
@@ -48,6 +49,68 @@ export class AttributionEngine {
       clearTimeout(timer);
     }
     this.pendingGraceTimers.clear();
+  }
+
+  /**
+   * Records a bank credit that could not be attributed to a live payment in the
+   * durable reconciliation queue. Never changes a payment status: an operator
+   * must review the case and use the authoritative confirmation flow.
+   * @param {{ session?: any, normalizedObs: any, observationId: string, reason: string }} input
+   * @returns {any|null}
+   */
+  _recordReviewCase({ session, normalizedObs, observationId, reason }) {
+    if (!this.reviewRepo) return null;
+    let merchantId = session?.merchantId || null;
+    if (!merchantId) {
+      const row = this.sessionRepo.db.queryOne(
+        'SELECT merchant_id FROM payment_receiving_accounts WHERE id = ?',
+        [normalizedObs.receivingAccountId]
+      );
+      merchantId = row?.merchant_id || null;
+    }
+    if (!merchantId) return null;
+
+    try {
+      const result = this.reviewRepo.create({
+        merchantId,
+        receivingAccountId: normalizedObs.receivingAccountId,
+        paymentSessionId: session?.id || null,
+        observationId,
+        amountPaise: normalizedObs.amountPaise,
+        bankReference: normalizedObs.bankReferenceNumber || null,
+        source: normalizedObs.source,
+        reason
+      });
+      if (result.created && this.auditRepo) {
+        this.auditRepo.log({
+          merchantId,
+          entityType: 'PAYMENT_REVIEW_CASE',
+          entityId: result.case.id,
+          action: 'PAYMENT_REVIEW_CASE_OPENED',
+          actorType: 'SYSTEM',
+          details: {
+            reason,
+            observationId,
+            paymentSessionId: session?.id || null,
+            amountPaise: normalizedObs.amountPaise.toString(),
+            bankReferenceNumber: normalizedObs.bankReferenceNumber || null
+          }
+        });
+      }
+      this.eventEmitter.emit('PAYMENT.REVIEW_REQUIRED', {
+        reviewCaseId: result.case.id,
+        merchantId,
+        paymentSessionId: session?.id || null,
+        amountPaise: normalizedObs.amountPaise,
+        reason
+      });
+      return result.case;
+    } catch (err) {
+      // Review queueing must never break observation intake; the audit trail
+      // above and the observation row remain the fallback evidence.
+      console.error('[Attribution] Failed to open review case:', err.message);
+      return null;
+    }
   }
 
   /**
@@ -749,9 +812,13 @@ export class AttributionEngine {
     // Tier 3: Late Observation Handling
     // Check if observation matches a recently expired or failed session on this receiving account (< 30 mins)
     const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+    // Cancelled orders are included here on purpose: a credit can still land
+    // after the customer cancelled, and it must reach the review queue rather
+    // than disappear (it never revives the cancelled session).
     const recentExpired = this.sessionRepo.findRecentlyExpiredOrFailed(
       normalizedObs.receivingAccountId,
-      thirtyMinutesAgo
+      thirtyMinutesAgo,
+      { includeCancelled: true }
     );
 
     const lateMatchedSession = recentExpired.find(s => s.amountPaise === normalizedObs.amountPaise);
@@ -759,6 +826,16 @@ export class AttributionEngine {
     if (lateMatchedSession) {
       // Mark observation as LATE_UNMATCHED
       this.obsRepo.markLateUnmatched(savedObs.id);
+
+      // A genuine bank credit that landed after the checkout window must never be
+      // lost: queue it for operator review. The expired/failed session itself is
+      // untouched (terminal invariants preserved).
+      this._recordReviewCase({
+        session: lateMatchedSession,
+        normalizedObs,
+        observationId: savedObs.id,
+        reason: 'LATE_AFTER_TERMINAL'
+      });
 
       if (this.auditRepo) {
         this.auditRepo.log({
@@ -809,6 +886,17 @@ export class AttributionEngine {
         observationId: savedObs.id,
         outcomeStatus: ObservationAttributionStatus.LATE_UNMATCHED
       };
+    }
+
+    // An unattributed credit that carries a bank reference is a real credit we
+    // could not place: queue it for reconciliation instead of dropping it.
+    if (normalizedObs.bankReferenceNumber) {
+      this._recordReviewCase({
+        session: null,
+        normalizedObs,
+        observationId: savedObs.id,
+        reason: 'UNMATCHED_BANK_CREDIT'
+      });
     }
 
     // Unattributed observation

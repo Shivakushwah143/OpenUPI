@@ -34,6 +34,8 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
   let merchantB;
   let accountA;
   let accountB;
+  let observerA;
+  let observerB;
 
   function request(path, options = {}) {
     return fetch(`${baseUrl}${path}`, {
@@ -100,6 +102,19 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
 
     apiInstance = await startServer(6197, testDb);
     baseUrl = `http://localhost:${apiInstance.port}`;
+
+    // Dedicated observer credentials (never the merchant/admin API keys).
+    const issueCredential = async merchantId => {
+      const res = await request('/api/v1/admin/observers/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...admin },
+        body: JSON.stringify({ merchantId, label: 'security suite' })
+      });
+      assert.equal(res.status, 201);
+      return { keyId: res.body.keyId, secret: res.body.secret, id: res.body.id, merchantId };
+    };
+    observerA = await issueCredential(merchantA.id);
+    observerB = await issueCredential(merchantB.id);
   });
 
   after(async () => {
@@ -180,13 +195,13 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
     // 2. Unknown observer credential
     const unknownKey = await request(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...signObserverRequest({ secret: 'unknown_observer_key', method: 'POST', path, rawBody }) },
+      headers: { 'Content-Type': 'application/json', ...signObserverRequest({ keyId: 'obs_unknown', secret: 'unknown_observer_secret', method: 'POST', path, rawBody }) },
       body: rawBody
     });
     assert.equal(unknownKey.status, 401);
 
     // 3. Signature valid for a DIFFERENT body (tampered amount) -> mismatch
-    const signedHeaders = signObserverRequest({ secret: merchantA.apiKey, method: 'POST', path, rawBody });
+    const signedHeaders = signObserverRequest({ ...observerA, method: 'POST', path, rawBody });
     const tamperedBody = JSON.stringify({ ...bodyObj, amountPaise: '99999900' });
     const tampered = await request(path, {
       method: 'POST',
@@ -200,7 +215,7 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...signObserverRequest({ secret: merchantA.apiKey, method: 'POST', path, rawBody, timestamp: Date.now() - 10 * 60 * 1000 })
+        ...signObserverRequest({ ...observerA, method: 'POST', path, rawBody, timestamp: Date.now() - 10 * 60 * 1000 })
       },
       body: rawBody
     });
@@ -218,7 +233,7 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
     });
     const headers = {
       'Content-Type': 'application/json',
-      ...signObserverRequest({ secret: merchantA.apiKey, method: 'POST', path, rawBody })
+      ...signObserverRequest({ ...observerA, method: 'POST', path, rawBody })
     };
 
     const first = await request(path, { method: 'POST', headers, body: rawBody });
@@ -243,7 +258,7 @@ describe('Security Hardening — Negative Access & Forgery Tests (P0-01..P0-07)'
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        ...signObserverRequest({ secret: merchantB.apiKey, method: 'POST', path, rawBody })
+        ...signObserverRequest({ ...observerB, method: 'POST', path, rawBody })
       },
       body: rawBody
     });

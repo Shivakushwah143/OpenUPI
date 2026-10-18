@@ -51,6 +51,9 @@ export class AndroidObserverDriver {
     const data = await res.json();
     this.deviceId = data.deviceId;
     this.signingKey = data.signingKey;
+    // The gateway pins the device to the merchant's receiving account at pairing
+    // time; observations reuse it unless the caller overrides explicitly.
+    this.receivingAccountId = data.receivingAccountId || null;
 
     return data;
   }
@@ -78,10 +81,14 @@ export class AndroidObserverDriver {
 
     const bodyObj = {
       deviceId: this.deviceId,
-      receivingAccountId: obs.receivingAccountId || '00000000-0000-0000-0000-000000000002',
+      // Only send an account we were actually paired with (or that the caller
+      // names). The server refuses any account outside the device's merchant.
+      receivingAccountId: obs.receivingAccountId || this.receivingAccountId || undefined,
       amount: obs.amount,
       amountPaise: obs.amountPaise !== undefined ? obs.amountPaise.toString() : undefined,
       observedAt: (obs.observedAt instanceof Date ? obs.observedAt : new Date(obs.observedAt || Date.now())).toISOString(),
+      // Advisory session hint; the server honours it only inside this device's tenant.
+      paymentSessionId: obs.paymentSessionId,
       bankReferenceNumber: obs.utr,
       senderVpa: obs.senderVpa,
       rawNotification: {

@@ -28,6 +28,7 @@ import {
   PaymentSessionRepository,
   ObservationRepository,
   SupportTicketRepository,
+  PaymentReviewRepository,
   AuditLogRepository,
   DeviceRepository,
   ObserverCredentialRepository
@@ -83,6 +84,7 @@ export function createPaymentApp(customDb = null, options = {}) {
   const obsRepo = new ObservationRepository(db);
   const ticketRepo = new SupportTicketRepository(db);
   const auditRepo = new AuditLogRepository(db);
+  const reviewRepo = new PaymentReviewRepository(db);
   const deviceRepo = new DeviceRepository(db);
   const observerCredentialRepo = new ObserverCredentialRepository(db);
 
@@ -108,6 +110,7 @@ export function createPaymentApp(customDb = null, options = {}) {
     sessionRepo,
     obsRepo,
     ticketRepo,
+    reviewRepo,
     auditRepo,
     eventEmitter
   });
@@ -458,6 +461,7 @@ export function createPaymentApp(customDb = null, options = {}) {
     observerCredentialRepo,
     obsRepo,
     ticketRepo,
+    reviewRepo,
     auditRepo,
     queueEngine,
     timingEngine,

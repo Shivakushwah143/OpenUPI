@@ -34,6 +34,10 @@ import { CoinWalletStoreServer } from '../apps/coin-wallet-store/src/server.js';
 import { YoupiPaymentClient } from '../packages/merchant-sdk/src/client.js';
 
 async function run53PointMatrix() {
+  // Harness credentials: the gateway fails closed, so the script authenticates
+  // explicitly instead of relying on a removed unauthenticated dev fallback.
+  process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+  process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   console.log('============================================================');
   console.log('🧪 RUNNING 53-POINT CUSTOMER IDENTITY & PAYMENT REGRESSION MATRIX');
   console.log('============================================================');
@@ -69,6 +73,10 @@ async function run53PointMatrix() {
     }
   });
 
+  // Merchant service credential: payment creation/status reads fail closed without one.
+  const merchantApiKey = merchant.apiKey || 'nova_merchant_api_key_test';
+  if (!merchant.apiKey) merchantRepo.update(merchant.id, { apiKey: merchantApiKey });
+
   const receivingAccount = accountRepo.create({
     merchantId: merchant.id,
     upiId: 'novastore@hdfcbank',
@@ -85,7 +93,8 @@ async function run53PointMatrix() {
   const demoStore = new CoinWalletStoreServer({
     gatewayApiUrl: apiBase,
     merchantId: merchant.id,
-    webhookSecret: merchant.webhookSecret
+    webhookSecret: merchant.webhookSecret,
+    apiKey: merchantApiKey
   });
   const demoServer = demoStore.createServer();
   await new Promise(resolve => demoServer.listen(5988, resolve));
@@ -97,6 +106,7 @@ async function run53PointMatrix() {
       const postData = body ? JSON.stringify(body) : null;
       const reqHeaders = {
         'Content-Type': 'application/json',
+        'X-Admin-Key': process.env.ADMIN_API_KEY || 'test_admin_api_key_123',
         ...headers
       };
       if (postData) {
@@ -274,7 +284,8 @@ async function run53PointMatrix() {
     const paymentClient = new YoupiPaymentClient({
       apiUrl: apiBase,
       merchantId: merchant.id,
-      webhookSecret: merchant.webhookSecret
+      webhookSecret: merchant.webhookSecret,
+      apiKey: merchantApiKey
     });
 
     const p1 = await paymentClient.createPayment({

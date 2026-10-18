@@ -5,6 +5,21 @@ import { startServer as startPaymentApi } from '../../../apps/payment-api/src/in
 import { AndroidObserverDriver } from '../driver.js';
 import { PaymentStatus } from '@youpi/common';
 
+// --- Test-harness credentials -------------------------------------------------
+// The gateway now FAILS CLOSED: administrative and payment-management endpoints
+// require a server-configured credential. Tests authenticate explicitly with the
+// harness operator credential instead of relying on a removed dev fallback.
+process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const AUTH_HEADERS = { 'X-Admin-Key': process.env.ADMIN_API_KEY };
+/** fetch with the harness operator credential merged into the headers. */
+const authFetch = (url, options = {}) => globalThis.fetch(url, {
+  ...options,
+  headers: { ...AUTH_HEADERS, ...(options.headers || {}) }
+});
+// ------------------------------------------------------------------------------
+
+
 describe('Android Payment Observer Integration Tests', () => {
   let apiInstance;
   let driver;
@@ -37,7 +52,7 @@ describe('Android Payment Observer Integration Tests', () => {
     // Preconditions (audit P0-05): enrollment requires a short-lived, single-use
     // challenge issued by the admin API. Static/predictable tokens are refused.
     const base = `http://localhost:${apiInstance.port}`;
-    const qrRes = await fetch(`${base}/api/v1/admin/sms-gateway/pair-qr`);
+    const qrRes = await authFetch(`${base}/api/v1/admin/sms-gateway/pair-qr`);
     assert.equal(qrRes.status, 200);
     const qr = await qrRes.json();
     assert.ok(qr.enrollmentToken);

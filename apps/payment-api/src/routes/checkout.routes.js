@@ -384,6 +384,8 @@ export function registerCheckoutRoutes(server, ctx) {
         amountPaise: session.amountPaise.toString(),
         currency: session.currency,
         status: session.status,
+        confirmationStatus: session.confirmationStatus || ConfirmationStatus.UNCONFIRMED,
+        paymentDetected: false,
         timeRemainingSeconds: 0,
         isTerminal: true,
         branding
@@ -580,6 +582,11 @@ export function registerCheckoutRoutes(server, ctx) {
       status: session.status,
       reason: session.metadata?.cancelledReason || null,
       cancelledReason: session.metadata?.cancelledReason || null,
+      // Observation evidence is surfaced as PAYMENT_DETECTED while the session
+      // stays unsettled. It never implies SUCCESS: only an authoritative bank
+      // confirmation can settle the payment (dual-truth model).
+      confirmationStatus: session.confirmationStatus || ConfirmationStatus.UNCONFIRMED,
+      paymentDetected: session.confirmationStatus === ConfirmationStatus.REPORTED,
       metadata: session.metadata || {},
       method: session.method,
       verificationLevel: session.verificationLevel || 0,

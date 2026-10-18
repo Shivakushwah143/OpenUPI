@@ -7,12 +7,23 @@ import { AndroidObserverDriver } from './driver.js';
  */
 
 const API_BASE = process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100';
-const ENROLLMENT_SECRET = process.env.ANDROID_ENROLLMENT_SECRET || 'android_pairing_enrollment_secret_key_32_chars';
+// Pairing is a single-use, short-lived challenge issued by the gateway
+// (POST/GET /api/v1/admin/sms-gateway/pair-qr). The old static
+// ANDROID_ENROLLMENT_SECRET is refused by the hardened backend, so there is no
+// fallback here: export the token printed by the pair-qr endpoint.
+const PAIRING_TOKEN = process.env.ANDROID_PAIRING_TOKEN || process.env.ENROLLMENT_TOKEN || '';
 
 async function main() {
   console.log('========================================================');
   console.log('📱 YOUPI Android Payment Observer Notification Simulator');
   console.log('========================================================');
+
+  if (!PAIRING_TOKEN) {
+    console.error('\nMissing pairing token. Issue one first:\n' +
+      '  curl -s -H "X-Admin-Key: $ADMIN_API_KEY" ' + API_BASE + '/api/v1/admin/sms-gateway/pair-qr\n' +
+      'then re-run with ANDROID_PAIRING_TOKEN=<enrollmentToken>.');
+    process.exit(1);
+  }
 
   const driver = new AndroidObserverDriver({
     apiBaseUrl: API_BASE,
@@ -22,7 +33,7 @@ async function main() {
 
   // Step 1: Pair simulated device
   console.log('\n[1/3] Enrolling & Pairing Android Device with Gateway...');
-  const pairData = await driver.pair(ENROLLMENT_SECRET);
+  const pairData = await driver.pair(PAIRING_TOKEN);
   console.log(`[✓] Device Paired! Assigned ID: ${pairData.deviceId}`);
 
   // Step 2: Send Heartbeat

@@ -3470,6 +3470,17 @@
 
             <!-- PC RIGHT ACTIVE PAYMENT WORKSPACE -->
             <div class="ypg-pc-active-view">
+              <!-- Automatic PAYMENT_DETECTED notice: an observer reported a matching
+                   credit. Evidence only — settlement still requires bank confirmation. -->
+              <div id="paymentDetectedBanner" hidden
+                style="display:flex; gap:10px; align-items:flex-start; background:#ecfdf5; border:1px solid #a7f3d0; color:#065f46; border-radius:10px; padding:12px 14px; margin-bottom:14px; font-size:13px; line-height:1.45;">
+                <div class="ypg-radar-dot" style="background:#059669; margin-top:4px; flex:none;"></div>
+                <div>
+                  <strong>Payment detected.</strong>
+                  <div style="font-size:12px; color:#047857;">We received a matching bank credit notification and are
+                    confirming it with your bank. Please do not pay again.</div>
+                </div>
+              </div>
               <!-- VIEW A: PURE UPI QR INTERFACE -->
               <div id="viewUpiContent">
                 <h2 class="ypg-page-title">UPI QR Payment</h2>
@@ -3735,8 +3746,8 @@
               <div id="viewProcessingContent" hidden>
                 <div
                   style="padding:28px 16px 20px; display:flex; flex-direction:column; align-items:center; text-align:center;">
-                  <div class="rzp-sheet-title">Processing your payment</div>
-                  <div class="rzp-sheet-subtitle">This will only take a few seconds.</div>
+                  <div class="rzp-sheet-title" id="procTitleText">Processing your payment</div>
+                  <div class="rzp-sheet-subtitle" id="procSubtitleText">This will only take a few seconds.</div>
                   <div class="rzp-coin-stage">
                     <div class="rzp-halo-ring"></div>
                     <div class="rzp-3d-coin">
@@ -5895,6 +5906,8 @@
       if (['SUCCESS', 'CANCELLED', 'EXPIRED', 'FAILED'].includes(data.status)) {
         if (queuePollTimer) { clearInterval(queuePollTimer); queuePollTimer = null; }
         if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+        const terminalDetectedBanner = document.getElementById('paymentDetectedBanner');
+        if (terminalDetectedBanner) terminalDetectedBanner.hidden = true;
         setGatewayAuthMode(false);
 
         if (data.status === 'CANCELLED') {
@@ -6023,6 +6036,12 @@
           return;
         }
       }
+
+      // --- 2b. PAYMENT_DETECTED (observation evidence, not settlement) ---
+      // A valid matching observation flips the checkout into "detected" while the
+      // session itself stays ACTIVE/PROCESSING. Only SUCCESS ends the page.
+      const detectedBanner = document.getElementById('paymentDetectedBanner');
+      if (detectedBanner) detectedBanner.hidden = !data.paymentDetected;
 
       // Sync payment methods & modality layout immediately to match merchant settings
       renderMethodSelectorBar(data);
@@ -6206,6 +6225,15 @@
         hideAllContent();
         document.getElementById('viewProcessingContent').hidden = false;
         document.getElementById('ypgStickyFooter').style.display = 'none';
+        if (detectedBanner) detectedBanner.hidden = !data.paymentDetected;
+        const procTitle = document.getElementById('procTitleText');
+        const procSubtitle = document.getElementById('procSubtitleText');
+        if (procTitle) procTitle.textContent = data.paymentDetected ? 'Payment detected' : 'Processing your payment';
+        if (procSubtitle) {
+          procSubtitle.textContent = data.paymentDetected
+            ? 'We are confirming this credit with your bank. Please do not pay again.'
+            : 'This will only take a few seconds.';
+        }
         runCountdown(data.timeRemainingSeconds, sec => {
           document.getElementById('procTimerText').textContent = `${sec}s`;
         }, () => loadState(), data.expiresAt);

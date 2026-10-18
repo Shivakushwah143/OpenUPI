@@ -24,7 +24,8 @@ describe('Merchant SDK Integration Tests', () => {
     client = new YoupiPaymentClient({
       apiUrl: `http://localhost:${apiInstance.port}`,
       merchantId: '00000000-0000-0000-0000-000000000001',
-      webhookSecret: merchantSecret
+      webhookSecret: merchantSecret,
+      apiKey: 'test_merchant_api_key_123'
     });
   });
 

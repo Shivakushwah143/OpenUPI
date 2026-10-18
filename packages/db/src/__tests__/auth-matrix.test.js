@@ -34,6 +34,8 @@ import { CoinWalletStoreServer } from '../../../../apps/coin-wallet-store/src/se
 import { YoupiPaymentClient } from '@youpi/merchant-sdk';
 
 test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix', async () => {
+  process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+  process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   const testDb = new Database({ inMemory: true });
   runMigrations(testDb);
 
@@ -64,6 +66,10 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     }
   });
 
+  // Merchant service credential: payment creation/status reads fail closed without one.
+  const merchantApiKey = merchant.apiKey || 'nova_merchant_api_key_test';
+  if (!merchant.apiKey) merchantRepo.update(merchant.id, { apiKey: merchantApiKey });
+
   const receivingAccount = accountRepo.create({
     merchantId: merchant.id,
     upiId: 'novastore@hdfcbank',
@@ -78,7 +84,8 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
   const demoStore = new CoinWalletStoreServer({
     gatewayApiUrl: apiBase,
     merchantId: merchant.id,
-    webhookSecret: merchant.webhookSecret
+    webhookSecret: merchant.webhookSecret,
+    apiKey: merchantApiKey
   });
   const demoServer = demoStore.createServer();
   await new Promise(resolve => demoServer.listen(5984, resolve));
@@ -90,6 +97,7 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
       const postData = body ? JSON.stringify(body) : null;
       const reqHeaders = {
         'Content-Type': 'application/json',
+        'X-Admin-Key': process.env.ADMIN_API_KEY || 'test_admin_api_key_123',
         ...headers
       };
       if (postData) {
@@ -225,7 +233,8 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     const paymentClient = new YoupiPaymentClient({
       apiUrl: apiBase,
       merchantId: merchant.id,
-      webhookSecret: merchant.webhookSecret
+      webhookSecret: merchant.webhookSecret,
+      apiKey: merchantApiKey
     });
     const p1 = await paymentClient.createPayment({
       orderId: 'ORD-AUTO-01',
@@ -566,17 +575,15 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     assert.equal(dashSettings.status, 200);
     assert.equal(dashSettings.body.businessName, 'Nova Commerce Ltd');
 
-    // 52. Observer services work — observer intake now requires a signed credential
-    // derived from the merchant credential (audit P0-03).
-    const observerSecret = merchant.apiKey || 'apikey_auth_matrix_observer_secret';
-    if (!merchant.apiKey) {
-      merchantRepo.update(merchant.id, { apiKey: observerSecret });
-    }
+    // 52. Observer services work — observer intake requires a DEDICATED signed
+    // credential (never the merchant/admin API key).
+    const issuedRes = await httpReq('POST', `${apiBase}/api/v1/admin/observers/credentials`, { merchantId: merchant.id, label: '53-point matrix' });
+    assert.equal(issuedRes.status, 201);
     const pollerActive = await httpReq(
       'GET',
       `${apiBase}/api/v1/pollers/active-window`,
       null,
-      signObserverRequest({ secret: observerSecret, method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
+      signObserverRequest({ keyId: issuedRes.body.keyId, secret: issuedRes.body.secret, method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
     );
     assert.equal(pollerActive.status, 200);
     assert.ok(Array.isArray(pollerActive.body.sessions));

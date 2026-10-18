@@ -37,6 +37,7 @@ export const MERCHANT_ALLOWED_ADMIN_PATHS = Object.freeze([
   '/api/v1/admin/upi-settings',
   '/api/v1/admin/sms-gateway/pair-qr',
   '/api/v1/admin/sms-gateway/devices',
+  '/api/v1/admin/reconciliation-cases',
   '/api/v1/admin/tunnel/status'
 ]);
 

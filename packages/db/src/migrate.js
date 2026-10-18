@@ -156,6 +156,27 @@ export function runMigrations(targetDb) {
     );
   `); } catch {}
   try { db.exec("CREATE INDEX IF NOT EXISTS idx_observer_nonce_created ON observer_request_nonces (created_at);"); } catch {}
+  // Reconciliation queue for late / unmatchable bank credits (evidence only).
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_review_cases (
+      id TEXT PRIMARY KEY,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+      payment_session_id TEXT REFERENCES payment_sessions(id) ON DELETE SET NULL,
+      observation_id TEXT UNIQUE,
+      amount_paise INTEGER NOT NULL,
+      bank_reference TEXT,
+      source TEXT,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'OPEN',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT,
+      resolved_by TEXT,
+      resolution_note TEXT
+    );
+  `); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_payment_review_status ON payment_review_cases (status, created_at);"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_payment_review_merchant ON payment_review_cases (merchant_id, status);"); } catch {}
   // Dedicated observer credentials, separated from merchant/admin API keys.
   try { db.exec(`
     CREATE TABLE IF NOT EXISTS observer_credentials (

@@ -5,13 +5,25 @@ export class YoupiPaymentClient {
    * @param {{
    *   apiUrl?: string,
    *   merchantId?: string,
-   *   webhookSecret?: string
+   *   webhookSecret?: string,
+   *   apiKey?: string
    * }} options
    */
   constructor(options = {}) {
     this.apiUrl = (options.apiUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100').replace(/\/+$/, '');
     this.merchantId = options.merchantId || null;
     this.webhookSecret = options.webhookSecret || null;
+    // Merchant service credential. Required: payment creation and payment-status
+    // reads fail closed without a server-issued credential.
+    this.apiKey = options.apiKey || process.env.YOUPI_MERCHANT_API_KEY || process.env.MERCHANT_API_KEY || null;
+  }
+
+  /** Headers carrying the merchant credential used by every gateway call. */
+  authHeaders(extra = {}) {
+    const headers = { 'Content-Type': 'application/json', ...extra };
+    if (this.merchantId) headers['X-Merchant-Id'] = this.merchantId;
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey;
+    return headers;
   }
 
   /**
@@ -37,13 +49,7 @@ export class YoupiPaymentClient {
    */
   async createPayment(params) {
     const url = `${this.apiUrl}/api/v1/payments`;
-    const headers = {
-      'Content-Type': 'application/json'
-    };
-
-    if (this.merchantId) {
-      headers['X-Merchant-Id'] = this.merchantId;
-    }
+    const headers = this.authHeaders();
     if (params.idempotencyKey) {
       headers['Idempotency-Key'] = params.idempotencyKey;
     }
@@ -92,7 +98,8 @@ export class YoupiPaymentClient {
    */
   async getPayment(paymentId) {
     const url = `${this.apiUrl}/api/v1/payments/${paymentId}`;
-    const res = await fetch(url);
+    // Status reads are credential-scoped (merchant key or scoped checkout token).
+    const res = await fetch(url, { headers: this.authHeaders() });
 
     if (!res.ok) {
       const err = await res.text();

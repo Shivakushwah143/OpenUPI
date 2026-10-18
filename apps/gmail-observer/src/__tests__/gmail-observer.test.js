@@ -16,13 +16,23 @@ describe('Gmail Payment Observer Integration Tests', () => {
   before(async () => {
     testDb = new Database({ inMemory: true });
     apiInstance = await startPaymentApi(6198, testDb);
-    // Observer ingest is signed (audit P0-03): use the merchant API key issued by
-    // the gateway as the observer credential.
-    process.env.YOUPI_OBSERVER_KEY = testDb.queryOne('SELECT api_key FROM merchants ORDER BY created_at ASC LIMIT 1').api_key;
+    // Observer ingest is signed with a DEDICATED observer credential (separate from
+    // merchant/admin API keys); the secret is returned once at issuance.
+    process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+    process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    const merchantId = testDb.queryOne('SELECT id FROM merchants ORDER BY created_at ASC LIMIT 1').id;
+    const issuedRes = await fetch(`http://localhost:${apiInstance.port}/api/v1/admin/observers/credentials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': process.env.ADMIN_API_KEY },
+      body: JSON.stringify({ merchantId, label: 'observer suite' })
+    });
+    const issued = await issuedRes.json();
+    if (issuedRes.status !== 201) throw new Error(`Observer credential provisioning failed: ${issuedRes.status}`);
+    process.env.YOUPI_OBSERVER_CREDENTIAL = `${issued.keyId}.${issued.secret}`;
     gmailInstance = await startGmailObserver(6099, {
       apiBaseUrl: `http://localhost:${apiInstance.port}`,
       receivingAccountId: '00000000-0000-0000-0000-000000000002',
-      observerKey: process.env.YOUPI_OBSERVER_KEY
+      observerCredential: process.env.YOUPI_OBSERVER_CREDENTIAL
     });
     gmailBaseUrl = `http://localhost:${gmailInstance.port}`;
   });

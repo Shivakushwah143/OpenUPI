@@ -1,5 +1,5 @@
 import { PaymentObserverClient } from '@youpi/observer-sdk';
-import { signObserverRequest } from '@youpi/common';
+import { signObserverRequest, parseObserverCredential } from '@youpi/common';
 import { BankSmsParser } from './sms-parser.js';
 
 export class SmsObserverService {
@@ -13,11 +13,13 @@ export class SmsObserverService {
   constructor(options = {}) {
     this.apiBaseUrl = options.apiBaseUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100';
     // Signed observer credential: required for active-window / ingest calls (audit P0-03).
-    this.observerKey = options.observerKey || process.env.YOUPI_OBSERVER_KEY || process.env.YOUPI_MERCHANT_API_KEY || '';
+    // Dedicated observer credential (`<keyId>.<secret>`), separate from the merchant/admin API key.
+    this.observerCredential = options.observerCredential || process.env.YOUPI_OBSERVER_CREDENTIAL || '';
     this.receivingAccountId = options.receivingAccountId || '00000000-0000-0000-0000-000000000002';
     this.pollIntervalMs = options.pollIntervalMs || Number(process.env.SMS_OBSERVER_POLL_INTERVAL_MS || 3000);
     this.observerClient = new PaymentObserverClient({
       apiBaseUrl: this.apiBaseUrl,
+      observerCredential: this.observerCredential,
       sourceName: 'GOOGLE_MESSAGES'
     });
 
@@ -30,8 +32,8 @@ export class SmsObserverService {
   async resolveActiveReceivingAccount() {
     try {
       const res = await fetch(`${this.apiBaseUrl}/api/v1/pollers/active-window`, {
-        headers: this.observerKey
-          ? signObserverRequest({ secret: this.observerKey, method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
+        headers: this.observerCredential
+          ? signObserverRequest({ ...parseObserverCredential(this.observerCredential), method: 'GET', path: '/api/v1/pollers/active-window', rawBody: '' })
           : {},
         signal: AbortSignal.timeout(1000)
       });

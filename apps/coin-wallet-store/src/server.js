@@ -31,10 +31,13 @@ export class CoinWalletStoreServer {
     this.merchantId = options.merchantId || '00000000-0000-0000-0000-000000000001';
     this.webhookSecret = options.webhookSecret || 'merchant_webhook_secret_for_wallet_store';
 
+    // Merchant service credential (fail-closed gateway).
+    this.apiKey = options.apiKey || process.env.YOUPI_MERCHANT_API_KEY || process.env.MERCHANT_API_KEY || null;
     this.paymentClient = new YoupiPaymentClient({
       apiUrl: this.gatewayApiUrl,
       merchantId: this.merchantId,
-      webhookSecret: this.webhookSecret
+      webhookSecret: this.webhookSecret,
+      apiKey: this.apiKey
     });
 
     // In-memory persistent wallet balance & ledger for demo store

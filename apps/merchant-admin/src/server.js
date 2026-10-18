@@ -17,6 +17,43 @@ if (!process.env.BASE_PAYMENT_API_URL && typeof process.loadEnvFile === 'functio
   } catch {}
 }
 
+/**
+ * Gateway endpoints the local merchant console may call with the merchant
+ * credential attached server-side. Kept deliberately narrow: pairing QR, device
+ * list and device unpair only — never payments, refunds or bank confirmations.
+ */
+export const PAIRING_PROXY_ALLOWLIST = Object.freeze({
+  '/api/v1/admin/sms-gateway/pair-qr': ['GET'],
+  '/api/v1/admin/sms-gateway/devices': ['GET']
+});
+
+const isLoopbackAddress = address => {
+  const addr = String(address || '');
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+};
+
+/**
+ * Decides whether to attach the merchant API key to a proxied gateway request.
+ * Requires: loopback caller, allowlisted path+method, and NO caller-supplied
+ * gateway credential (which is forwarded untouched instead).
+ * @param {{ socket?: { remoteAddress?: string }, method?: string, headers?: Record<string, any> }} req
+ * @param {string} pathname
+ * @returns {boolean}
+ */
+export function shouldAttachPairingCredential(req, pathname) {
+  if (!isLoopbackAddress(req?.socket?.remoteAddress)) return false;
+
+  const headers = req?.headers || {};
+  if (headers['x-api-key'] || headers['x-admin-key'] || headers['authorization']) return false;
+
+  const method = String(req?.method || '').toUpperCase();
+  const allowedMethods = PAIRING_PROXY_ALLOWLIST[pathname];
+  if (allowedMethods && allowedMethods.includes(method)) return true;
+
+  // Device unpair: DELETE /api/v1/admin/sms-gateway/devices/:deviceId
+  return method === 'DELETE' && /^\/api\/v1\/admin\/sms-gateway\/devices\/[A-Za-z0-9-]+$/.test(pathname);
+}
+
 export class AdminServer {
   /**
    * @param {{
@@ -43,7 +80,9 @@ export class AdminServer {
     // This completely eliminates CORS errors, tunnel downtime 530s, and cross-origin failures.
     const clientApiBase = '';
     html = html.replaceAll('{{API_BASE_URL}}', clientApiBase);
-    html = html.replaceAll('{{ANDROID_ENROLLMENT_SECRET}}', process.env.ANDROID_ENROLLMENT_SECRET || 'android_pairing_enrollment_secret_key_32_chars');
+    // The legacy static enrollment secret is no longer accepted by the gateway
+    // (pairing uses single-use challenges), so it is never rendered into HTML.
+    html = html.replaceAll('{{ANDROID_ENROLLMENT_SECRET}}', '');
     return html;
   }
 
@@ -117,18 +156,30 @@ export class AdminServer {
         const targetPort = Number(process.env.PAYMENT_API_PORT || 6100);
         const defaultMerchant = this.merchantRepo.getDefault ? this.merchantRepo.getDefault() : (this.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || this.merchantRepo.findAll()[0]);
         const defaultMerchantId = defaultMerchant?.id || '00000000-0000-0000-0000-000000000001';
+
+        const proxyHeaders = {
+          ...req.headers,
+          'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
+          host: `localhost:${targetPort}`,
+          'x-forwarded-host': req.headers.host || '',
+          'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
+        };
+
+        // Pairing QR + device management are the only gateway calls this local
+        // console performs server-side. The merchant credential is attached HERE
+        // (never sent to the browser, never in a response) and only for loopback
+        // callers on an explicit allowlist; everything else stays unauthenticated
+        // and is refused by the gateway (fail closed).
+        if (shouldAttachPairingCredential(req, pathname) && defaultMerchant?.apiKey) {
+          proxyHeaders['x-api-key'] = defaultMerchant.apiKey;
+        }
+
         const proxyReq = http.request({
           hostname: '127.0.0.1',
           port: targetPort,
           path: req.url,
           method: req.method,
-          headers: {
-            ...req.headers,
-            'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
-            host: `localhost:${targetPort}`,
-            'x-forwarded-host': req.headers.host || '',
-            'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
-          }
+          headers: proxyHeaders
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);

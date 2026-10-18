@@ -5,6 +5,21 @@ import { Database } from '@youpi/db';
 import { startServer as startPaymentApi } from '../index.js';
 import { PaymentStatus, PaymentMethod } from '@youpi/common';
 
+// --- Test-harness credentials -------------------------------------------------
+// The gateway now FAILS CLOSED: administrative and payment-management endpoints
+// require a server-configured credential. Tests authenticate explicitly with the
+// harness operator credential instead of relying on a removed dev fallback.
+process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const AUTH_HEADERS = { 'X-Admin-Key': process.env.ADMIN_API_KEY };
+/** fetch with the harness operator credential merged into the headers. */
+const authFetch = (url, options = {}) => globalThis.fetch(url, {
+  ...options,
+  headers: { ...AUTH_HEADERS, ...(options.headers || {}) }
+});
+// ------------------------------------------------------------------------------
+
+
 describe('UPI Server Health Indicator & Checkout State Invariants', () => {
   let apiInstance;
   let baseUrl;
@@ -33,7 +48,7 @@ describe('UPI Server Health Indicator & Checkout State Invariants', () => {
       const url = new URL(path, baseUrl);
       const req = http.request(url, {
         method: options.method || 'GET',
-        headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }
+        headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS, ...(options.headers || {}) }
       }, res => {
         let data = '';
         res.on('data', chunk => { data += chunk; });

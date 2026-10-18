@@ -1,19 +1,20 @@
-import { generateHmac, signObserverRequest } from '@youpi/common';
+import { generateHmac, signObserverRequest, parseObserverCredential } from '@youpi/common';
 
 export class PaymentObserverClient {
   /**
    * @param {{
    *   apiBaseUrl?: string,
    *   sourceName: string,
-   *   observerKey?: string
+   *   observerCredential?: string
    * }} options
    */
   constructor(options) {
     this.apiBaseUrl = (options.apiBaseUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100').replace(/\/+$/, '');
     this.sourceName = options.sourceName;
-    // Observer credential (merchant API key). Required: observer ingest rejects
-    // unsigned or unknown-credential requests (audit P0-03).
-    this.observerKey = options.observerKey || process.env.YOUPI_OBSERVER_KEY || process.env.YOUPI_MERCHANT_API_KEY || '';
+    // Dedicated observer credential (`<keyId>.<secret>`), separate from merchant and
+    // admin API keys. Required: observer ingest rejects unsigned or unknown
+    // credentials (observer hardening sprint).
+    this.observerCredential = options.observerCredential || process.env.YOUPI_OBSERVER_CREDENTIAL || '';
   }
 
   /**
@@ -23,13 +24,13 @@ export class PaymentObserverClient {
    * @param {string} rawBody
    */
   signedHeaders(path, method, rawBody = '') {
-    if (!this.observerKey) {
-      throw new Error('Observer credential missing: set observerKey or YOUPI_OBSERVER_KEY before calling the gateway.');
+    if (!this.observerCredential) {
+      throw new Error('Observer credential missing: set observerCredential or YOUPI_OBSERVER_CREDENTIAL before calling the gateway.');
     }
     return {
       'Content-Type': 'application/json',
       ...signObserverRequest({
-        secret: this.observerKey,
+        ...parseObserverCredential(this.observerCredential),
         method,
         path,
         rawBody

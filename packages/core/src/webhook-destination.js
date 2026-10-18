@@ -63,6 +63,27 @@ function isBlockedIPv6(address) {
   return false;
 }
 
+/** Loopback only (the single class of internal target a dev/test run may reach). */
+export function isLoopbackAddress(address) {
+  if (net.isIPv4(address)) {
+    return ipv4ToInt(address) >>> 24 === 127;
+  }
+  if (net.isIPv6(address)) {
+    const normalized = address.toLowerCase().split('%')[0];
+    return normalized === '::1' || normalized === '::ffff:127.0.0.1';
+  }
+  return false;
+}
+
+/**
+ * @param {string} address
+ * @param {boolean} allowLoopback
+ */
+function isRefusedAddress(address, allowLoopback) {
+  if (isLoopbackAddress(address)) return !allowLoopback;
+  return isBlockedAddress(address);
+}
+
 /** @param {string} address */
 export function isBlockedAddress(address) {
   if (net.isIPv4(address)) return isBlockedIPv4(address);
@@ -96,7 +117,8 @@ export async function validateWebhookDestination(rawUrl, options = {}) {
   }
 
   const isLocalDev = process.env.NODE_ENV !== 'production';
-  const allowLocalhost = options.allowLocalhost === true || isLocalDev;
+  // Caller preference wins; otherwise non-production runs may reach loopback only.
+  const allowLocalhost = options.allowLocalhost !== undefined ? options.allowLocalhost === true : isLocalDev;
 
   if (url.protocol === 'http:' && !allowLocalhost) {
     return { ok: false, reason: 'HTTPS_REQUIRED' };
@@ -107,9 +129,11 @@ export async function validateWebhookDestination(rawUrl, options = {}) {
     return { ok: false, reason: 'BLOCKED_HOST' };
   }
 
-  // Literal IP addresses are checked without DNS.
+  // Literal IP addresses are checked without DNS. Loopback is the ONLY internal
+  // target permitted (and only outside production); link-local/metadata, RFC1918,
+  // CGNAT and reserved ranges are always refused.
   if (net.isIP(hostname)) {
-    if (isBlockedAddress(hostname) && !allowLocalhost) {
+    if (isRefusedAddress(hostname, allowLocalhost)) {
       return { ok: false, reason: 'BLOCKED_ADDRESS' };
     }
     return { ok: true, url, addresses: [hostname] };
@@ -131,7 +155,7 @@ export async function validateWebhookDestination(rawUrl, options = {}) {
   for (const address of addresses) {
     // A hostname that resolves to ANY internal address is refused (DNS-rebinding
     // and split-horizon targets included).
-    if (isBlockedAddress(address) && !allowLocalhost) {
+    if (isRefusedAddress(address, allowLocalhost)) {
       return { ok: false, reason: 'BLOCKED_ADDRESS', addresses };
     }
   }

@@ -6,16 +6,40 @@ import { startServer } from '../index.js';
 import { PaymentStatus, ObserverSource, verifyHmac } from '@youpi/common';
 import { signObserverRequest } from '@youpi/common';
 
+// --- Test-harness credentials -------------------------------------------------
+// The gateway now FAILS CLOSED: administrative and payment-management endpoints
+// require a server-configured credential. Tests authenticate explicitly with the
+// harness operator credential instead of relying on a removed dev fallback.
+process.env.ADMIN_API_KEY = process.env.ADMIN_API_KEY || 'test_admin_api_key_123';
+process.env.YOUPI_SECRET_KEY = process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+const AUTH_HEADERS = { 'X-Admin-Key': process.env.ADMIN_API_KEY };
+/** fetch with the harness operator credential merged into the headers. */
+const authFetch = (url, options = {}) => globalThis.fetch(url, {
+  ...options,
+  headers: { ...AUTH_HEADERS, ...(options.headers || {}) }
+});
+// ------------------------------------------------------------------------------
+
+
 describe('Payment API End-to-End HTTP Integration Tests', () => {
   let serverInstance;
   let baseUrl;
   let testDb;
+  /** Dedicated observer credential (never the merchant/admin API key). */
+  let observerCredential = null;
 
   before(async () => {
     testDb = new Database({ inMemory: true });
     // Use an ephemeral random port (e.g. 0 or high port 6199) to prevent collisions
     serverInstance = await startServer(6199, testDb);
     baseUrl = `http://localhost:${serverInstance.port}`;
+
+    // Provision a dedicated observer credential through the authenticated admin API;
+    // the secret is returned exactly once (observer hardening sprint item 1).
+    const merchantId = testDb.queryOne('SELECT id FROM merchants ORDER BY created_at ASC LIMIT 1').id;
+    const issued = await request('/api/v1/admin/observers/credentials', { method: 'POST', body: { merchantId, label: 'payment-api suite' } });
+    assert.equal(issued.status, 201);
+    observerCredential = { keyId: issued.body.keyId, secret: issued.body.secret };
   });
 
   after(async () => {
@@ -28,7 +52,7 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       const url = new URL(path, baseUrl);
       const reqOpts = {
         method: options.method || 'GET',
-        headers: options.headers || {}
+        headers: { ...AUTH_HEADERS, ...(options.headers || {}) }
       };
 
       const req = http.request(url, reqOpts, res => {
@@ -63,14 +87,13 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
    */
   async function signedPoller(body) {
     const path = '/api/v1/pollers/events';
-    const observerKey = testDb.queryOne('SELECT api_key FROM merchants ORDER BY created_at ASC LIMIT 1').api_key;
     const rawBody = JSON.stringify(body);
     return request(path, {
       method: 'POST',
       body: rawBody,
       headers: {
         'Content-Type': 'application/json',
-        ...signObserverRequest({ secret: observerKey, method: 'POST', path, rawBody })
+        ...signObserverRequest({ ...observerCredential, method: 'POST', path, rawBody })
       }
     });
   }
@@ -166,8 +189,23 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       });
 
     assert.equal(confirmObsRes.status, 200);
-    assert.equal(confirmObsRes.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
-    assert.equal(confirmObsRes.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
+    // Two independent channels corroborated the SAME bank credit: that is evidence,
+    // not settlement. Without an authenticated bank/acquirer confirmation the
+    // payment must remain unsettled.
+    assert.equal(confirmObsRes.body.attribution.verificationLevel, 2);
+    assert.notEqual(confirmObsRes.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+
+    const bankConfirmA = await request('/api/v1/admin/bank-confirmations', {
+      method: 'POST',
+      body: {
+        receivingAccountId: '00000000-0000-0000-0000-000000000002',
+        bankReferenceNumber: 'UTR-HTTP-999',
+        amountPaise: 20000,
+        source: 'ACQUIRER'
+      }
+    });
+    assert.equal(bankConfirmA.status, 200);
+    assert.equal(bankConfirmA.body.confirmed, true);
 
     // 6. Verify Payment A is SUCCESS via public API
     const verifyA = await request(`/api/v1/payments/${paymentIdA}`);
@@ -568,9 +606,20 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
 
     assert.equal(obs2.status, 200);
     assert.equal(obs2.body.attribution.verificationLevel, 2);
-    assert.equal(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
-    assert.equal(obs2.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
     assert.ok(obs2.body.attribution.verificationTag.includes('Dual Verification'));
+    // Corroboration is evidence only; the authenticated bank confirmation settles it.
+    assert.notEqual(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+
+    const bankConfirm2 = await request('/api/v1/admin/bank-confirmations', {
+      method: 'POST',
+      body: {
+        receivingAccountId: '00000000-0000-0000-0000-000000000002',
+        bankReferenceNumber: 'UTR-TIER-001',
+        amountPaise: 65000,
+        source: 'ACQUIRER'
+      }
+    });
+    assert.equal(bankConfirm2.body.confirmed, true);
 
     const checkL2 = await request(`/api/v1/payments/${paymentId}`);
     assert.equal(checkL2.body.status, 'SUCCESS');
@@ -804,8 +853,20 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
         });
       assert.equal(obs2.status, 200);
       assert.equal(obs2.body.attribution.verificationLevel, 2);
-      assert.equal(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
-      assert.equal(obs2.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
+      // Two channels corroborate the credit; only the authenticated bank
+      // confirmation may settle (and fire the single webhook).
+      assert.notEqual(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+
+      const bankConfirm3 = await request('/api/v1/admin/bank-confirmations', {
+        method: 'POST',
+        body: {
+          receivingAccountId: '00000000-0000-0000-0000-000000000002',
+          bankReferenceNumber: 'UTR-NOCLICK-999',
+          amountPaise: 32000,
+          source: 'ACQUIRER'
+        }
+      });
+      assert.equal(bankConfirm3.body.confirmed, true);
 
       // Invariant: Verification level in admin upgrades to L2 (Dual Verification)
       const checkAfterObs2 = await request(`/api/v1/payments/${paymentId}`);

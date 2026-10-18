@@ -8,6 +8,7 @@ const testFiles = [
   'packages/db/src/__tests__/payment-integrity.test.js',
   'packages/core/src/__tests__/core.test.js',
   'packages/core/src/__tests__/payment-integrity.test.js',
+  'packages/core/src/__tests__/webhook-outbox.test.js',
   'packages/core/src/__tests__/queue-timing.test.js',
   'packages/core/src/__tests__/webhook-engine.test.js',
   'packages/merchant-sdk/src/__tests__/merchant-sdk.test.js',
@@ -19,9 +20,12 @@ const testFiles = [
   'apps/gmail-observer/src/__tests__/gmail-observer.test.js',
   'apps/sms-observer/src/__tests__/sms-observer.test.js',
   'apps/android-observer-app/__tests__/android-observer.test.js',
+  'apps/android-observer-app/__tests__/android-observer-paytm-bob.test.js',
   'apps/control-center/src/__tests__/control-center.test.js',
   'apps/payment-api/src/__tests__/security-hardening.test.js',
+  'apps/payment-api/src/__tests__/security-hardening-sprint2.test.js',
   'apps/payment-api/src/__tests__/payment-api.test.js',
+  'apps/payment-api/src/__tests__/late-payment-review.test.js',
   'apps/payment-api/src/__tests__/counter-payments.test.js',
   'apps/payment-api/src/__tests__/selling-modes-and-cod.test.js',
   'apps/payment-api/src/__tests__/developer-payment-simulator.test.js',
@@ -54,7 +58,12 @@ for (let i = 0; i < testFiles.length; i++) {
     env: {
       ...process.env,
       YOUPI_MODE: 'localhost',
-      NODE_ENV: 'test'
+      NODE_ENV: 'test',
+      // Harness credentials: the gateway fails closed, so the suites authenticate
+      // explicitly instead of relying on a removed unauthenticated dev fallback.
+      ADMIN_API_KEY: process.env.ADMIN_API_KEY || 'test_admin_api_key_123',
+      YOUPI_SECRET_KEY: process.env.YOUPI_SECRET_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      TEST_MERCHANT_API_KEY: process.env.TEST_MERCHANT_API_KEY || 'test_merchant_api_key_123'
     },
     encoding: 'utf8'
   });

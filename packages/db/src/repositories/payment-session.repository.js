@@ -676,15 +676,27 @@ export class PaymentSessionRepository {
     }
   }
 
-  findRecentlyExpiredOrFailed(receivingAccountId, sinceDate) {
+  /**
+   * Recently closed sessions on a receiving account, used for late-credit
+   * detection. `includeCancelled` additionally covers orders the customer
+   * cancelled before the bank credit landed.
+   * @param {string} receivingAccountId
+   * @param {Date} sinceDate
+   * @param {{ includeCancelled?: boolean }} [options]
+   */
+  findRecentlyExpiredOrFailed(receivingAccountId, sinceDate, options = {}) {
+    const statuses = options.includeCancelled
+      ? [PaymentStatus.EXPIRED, PaymentStatus.FAILED, PaymentStatus.CANCELLED]
+      : [PaymentStatus.EXPIRED, PaymentStatus.FAILED];
+    const placeholders = statuses.map(() => '?').join(', ');
     const rows = this.db.query(`
       SELECT * FROM payment_sessions
       WHERE receiving_account_id = ?
-        AND status IN (?, ?)
+        AND status IN (${placeholders})
         AND updated_at >= ?
       ORDER BY updated_at DESC
       LIMIT 20
-    `, [receivingAccountId, PaymentStatus.EXPIRED, PaymentStatus.FAILED, sinceDate.toISOString()]);
+    `, [receivingAccountId, ...statuses, sinceDate.toISOString()]);
 
     return rows.map(r => this.mapRow(r));
   }

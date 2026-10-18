@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The applicationId/namespace live in app/build.gradle.kts (AGP 8 no longer
+     accepts a package attribute here). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.youpi.observer"
     android:versionCode="1"
     android:versionName="1.0.0">
 

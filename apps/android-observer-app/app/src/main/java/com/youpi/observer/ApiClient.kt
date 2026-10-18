@@ -60,11 +60,16 @@ class ApiClient(private val context: Context) {
                 if (json.optBoolean("paired", false)) {
                     val deviceId = json.getString("deviceId")
                     val signingKey = json.getString("signingKey")
+                    // Account pinned by the gateway at pairing time: every
+                    // observation is attributed to the account whose QR the
+                    // merchant actually shows.
+                    val receivingAccountId = json.optString("receivingAccountId", "")
 
                     prefs.edit()
                         .putString("base_url", cleanUrl)
                         .putString("device_id", deviceId)
                         .putString("signing_key", signingKey)
+                        .putString("receiving_account_id", receivingAccountId)
                         .apply()
 
                     return true
@@ -100,6 +105,10 @@ class ApiClient(private val context: Context) {
             put("bankReferenceNumber", parsed.bankReferenceNumber)
             put("senderVpa", parsed.senderVpa)
             put("rawNotification", rawNotification)
+            val receivingAccountId = prefs.getString("receiving_account_id", null)
+            if (!receivingAccountId.isNullOrEmpty()) {
+                put("receivingAccountId", receivingAccountId)
+            }
         }
 
         val bodyString = bodyJson.toString()
@@ -128,6 +137,7 @@ class ApiClient(private val context: Context) {
         if (!isPaired()) return false
 
         val deviceId = prefs.getString("device_id", null) ?: return false
+        val signingKey = prefs.getString("signing_key", null) ?: return false
         val baseUrl = getBaseUrl()
         val url = "$baseUrl/api/v1/pollers/android/heartbeat"
 
@@ -136,10 +146,18 @@ class ApiClient(private val context: Context) {
             put("timestamp", System.currentTimeMillis())
         }
 
+        // Heartbeats are authenticated exactly like observations (audit P0-04):
+        // HMAC-SHA256 over "<rawBody>:<timestamp>" inside a 60s window.
+        val bodyString = bodyJson.toString()
+        val timestamp = System.currentTimeMillis().toString()
+        val signature = calculateHmac("$bodyString:$timestamp", signingKey)
+
         val request = Request.Builder()
             .url(url)
             .addHeader("X-Device-Id", deviceId)
-            .post(bodyJson.toString().toRequestBody("application/json".toMediaType()))
+            .addHeader("X-Timestamp", timestamp)
+            .addHeader("X-Signature", signature)
+            .post(bodyString.toRequestBody("application/json".toMediaType()))
             .build()
 
         try {

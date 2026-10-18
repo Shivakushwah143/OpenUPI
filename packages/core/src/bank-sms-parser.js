@@ -80,14 +80,17 @@ export class BankSmsParser {
     const text = (sms.text || '').trim();
     if (!text) return null;
 
-    // Check if SMS represents an incoming credit
-    const creditKeywords = /(credited|received|deposit|payment received|payment|upi\/cr|transferred)/i;
+    // Check if SMS/notification represents an incoming credit.
+    // Includes Bank of Baroda "Cr" shorthand and Paytm/UPI P2P phrasing
+    // ("₹10 sent you", "Rahul paid you ₹10").
+    const creditKeywords = /(credited|received|deposit|payment received|payment|upi\/cr|\bcr\b|sent you|paid you|money added|transferred)/i;
     if (!creditKeywords.test(text)) {
       return null;
     }
 
-    // Ignore pure debits
-    if (/(debited|withdrawn|sent rs|paid rs)/i.test(text) && !/(credited|received|deposit)/i.test(text)) {
+    // Ignore pure debits ("debited", "Dr", "you paid/sent")
+    if (/(debited|withdrawn|\bdr\b|you sent|you paid|sent rs|sent ₹|paid rs|paid to)/i.test(text) &&
+        !/(credited|received|deposit|sent you|paid you)/i.test(text)) {
       return null;
     }
 
@@ -100,7 +103,7 @@ export class BankSmsParser {
     // 2. Extract Bank Reference / UTR / RRN
     let bankRef;
     const utrPatterns = [
-      /(?:upi\s*ref(?:erence)?\s*(?:no\.?|num)?|utr(?:\s*no\.?)?|rrn(?:\s*no\.?)?|txn\s*(?:id|ref)?|ref\s*no\.?)[\s:=-]+([a-zA-Z0-9]{6,25})/i,
+      /(?:upi\s*ref(?:erence)?\s*(?:no\.?|num)?|transaction\s*(?:id|ref)|utr(?:\s*no\.?)?|rrn(?:\s*no\.?)?|txn\s*(?:id|ref)?|ref\s*no\.?)[\s:=-]+([a-zA-Z0-9]{6,25})/i,
       /(?:ref(?:\s*no)?\s*[:#\s]?\s*)([a-zA-Z0-9]{8,22})/i,
       /\b([0-9]{12})\b/
     ];

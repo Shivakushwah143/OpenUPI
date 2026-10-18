@@ -221,7 +221,14 @@ export class PaymentVerificationPipeline {
     // 0. Resolve Payment Session and Customer Context early for security attribution
     let session = null;
     if (input.paymentSessionId) {
-      session = this.sessionRepo.findById(input.paymentSessionId);
+      const candidate = this.sessionRepo.findById(input.paymentSessionId);
+      // A caller-supplied session id is advisory only: it is honoured exclusively
+      // when it belongs to the authenticated tenant AND to the observation's own
+      // receiving account (audit P0-09). Otherwise it is ignored and resolution
+      // falls back to account-scoped matching below.
+      const tenantMatches = !input.merchantId || !candidate || candidate.merchantId === input.merchantId;
+      const accountMatches = !input.receivingAccountId || !candidate || candidate.receivingAccountId === input.receivingAccountId;
+      if (candidate && tenantMatches && accountMatches) session = candidate;
     } else if (input.receivingAccountId) {
       session = this.sessionRepo.findCurrentActiveOrProcessing(input.receivingAccountId);
     }

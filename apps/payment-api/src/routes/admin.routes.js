@@ -1493,6 +1493,306 @@ export function registerAdminRoutes(server, ctx) {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // Dedicated observer credentials (observer hardening sprint items 1 & 2).
+  // Observation ingest authenticates with these, never with a merchant/admin key.
+  // The secret is returned exactly once, at issuance or rotation.
+  // ---------------------------------------------------------------------------
+  server.get('/api/v1/admin/observers/credentials', async (req, res) => {
+    const merchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : (req.query.merchantId || null);
+    const repo = ctx.observerCredentialRepo;
+    if (!repo) {
+      HttpServer.json(res, 503, { error: 'Observer credential store unavailable.' });
+      return;
+    }
+
+    const credentials = merchantId
+      ? repo.findByMerchant(merchantId)
+      : ctx.db.query('SELECT * FROM observer_credentials ORDER BY created_at DESC').map(r => ({
+        id: r.id,
+        merchantId: r.merchant_id,
+        keyId: r.key_id,
+        label: r.label,
+        status: r.status,
+        createdAt: r.created_at,
+        rotatedAt: r.rotated_at,
+        revokedAt: r.revoked_at,
+        lastUsedAt: r.last_used_at
+      }));
+
+    HttpServer.json(res, 200, {
+      credentials: credentials.map(c => ({
+        id: c.id,
+        merchantId: c.merchantId,
+        keyId: c.keyId,
+        label: c.label,
+        status: c.status,
+        createdAt: c.createdAt,
+        rotatedAt: c.rotatedAt,
+        revokedAt: c.revokedAt,
+        lastUsedAt: c.lastUsedAt
+        // secret material is never returned here
+      }))
+    });
+  });
+
+  server.post('/api/v1/admin/observers/credentials', async (req, res) => {
+    const body = await HttpServer.parseBody(req);
+    const merchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : (body.merchantId || null);
+    const repo = ctx.observerCredentialRepo;
+
+    if (!repo) {
+      HttpServer.json(res, 503, { error: 'Observer credential store unavailable.' });
+      return;
+    }
+    if (!merchantId || !ctx.merchantRepo.findById(merchantId)) {
+      HttpServer.json(res, 400, { error: 'A valid merchantId is required to issue an observer credential.' });
+      return;
+    }
+
+    const issued = repo.issue({ merchantId, label: body.label || null });
+    ctx.auditRepo.log({
+      merchantId,
+      entityType: 'OBSERVER_CREDENTIAL',
+      entityId: issued.id,
+      action: 'OBSERVER_CREDENTIAL_ISSUED',
+      actorType: AuditActorType.ADMIN,
+      actorId: req.auth?.actorId || 'admin',
+      details: { keyId: issued.keyId, label: issued.label }
+    });
+
+    HttpServer.json(res, 201, {
+      id: issued.id,
+      merchantId: issued.merchantId,
+      keyId: issued.keyId,
+      label: issued.label,
+      createdAt: issued.createdAt,
+      // Returned once; stored only in sealed form.
+      secret: issued.secret,
+      credential: `${issued.keyId}.${issued.secret}`,
+      usage: 'Send X-Observer-Key: <keyId> and sign the canonical request with <secret>.'
+    });
+  });
+
+  server.post('/api/v1/admin/observers/credentials/:id/rotate', async (req, res, params) => {
+    const repo = ctx.observerCredentialRepo;
+    const existing = repo ? repo.findById(params.id) : null;
+    if (!existing) {
+      HttpServer.json(res, 404, { error: 'Observer credential not found.' });
+      return;
+    }
+    if (req.auth?.role === 'MERCHANT' && existing.merchantId !== req.auth.merchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant credential rotation refused.' });
+      return;
+    }
+
+    const issued = repo.rotate(existing.id);
+    ctx.auditRepo.log({
+      merchantId: existing.merchantId,
+      entityType: 'OBSERVER_CREDENTIAL',
+      entityId: issued.id,
+      action: 'OBSERVER_CREDENTIAL_ROTATED',
+      actorType: AuditActorType.ADMIN,
+      actorId: req.auth?.actorId || 'admin',
+      details: { previousKeyId: existing.keyId, keyId: issued.keyId }
+    });
+
+    HttpServer.json(res, 200, {
+      rotated: true,
+      id: issued.id,
+      keyId: issued.keyId,
+      secret: issued.secret,
+      credential: `${issued.keyId}.${issued.secret}`,
+      previousKeyId: existing.keyId
+    });
+  });
+
+  server.post('/api/v1/admin/observers/credentials/:id/revoke', async (req, res, params) => {
+    const repo = ctx.observerCredentialRepo;
+    const existing = repo ? repo.findById(params.id) : null;
+    if (!existing) {
+      HttpServer.json(res, 404, { error: 'Observer credential not found.' });
+      return;
+    }
+    if (req.auth?.role === 'MERCHANT' && existing.merchantId !== req.auth.merchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant credential revocation refused.' });
+      return;
+    }
+
+    const revoked = repo.revoke(existing.id);
+    ctx.auditRepo.log({
+      merchantId: existing.merchantId,
+      entityType: 'OBSERVER_CREDENTIAL',
+      entityId: existing.id,
+      action: 'OBSERVER_CREDENTIAL_REVOKED',
+      actorType: AuditActorType.ADMIN,
+      actorId: req.auth?.actorId || 'admin',
+      details: { keyId: existing.keyId }
+    });
+
+    HttpServer.json(res, 200, { revoked: true, id: revoked.id, keyId: revoked.keyId, status: revoked.status });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Authoritative bank/acquirer confirmation (sprint item 7). Only this path (or
+  // an operator-driven manual reconciliation with independently observed
+  // evidence) can move a UPI session to SUCCESS.
+  // ---------------------------------------------------------------------------
+  server.post('/api/v1/admin/bank-confirmations', async (req, res) => {
+    const body = await HttpServer.parseBody(req);
+    const receivingAccountId = body.receivingAccountId || body.accountId;
+    const bankReferenceNumber = String(body.bankReferenceNumber || body.utr || '').trim();
+    const amountPaise = body.amountPaise !== undefined ? Number(body.amountPaise) : null;
+    const account = receivingAccountId ? ctx.accountRepo.findById(receivingAccountId) : null;
+
+    if (!account || !bankReferenceNumber || amountPaise === null || Number.isNaN(amountPaise)) {
+      HttpServer.json(res, 400, {
+        error: 'receivingAccountId, bankReferenceNumber and amountPaise are required.'
+      });
+      return;
+    }
+
+    if (req.auth?.role === 'MERCHANT' && account.merchantId !== req.auth.merchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant bank confirmation refused.' });
+      return;
+    }
+
+    const source = String(body.source || 'ACQUIRER').toUpperCase();
+    if (!['ACQUIRER', 'BANK_API', 'PSP_WEBHOOK', 'MANUAL_OPERATOR'].includes(source)) {
+      HttpServer.json(res, 400, { error: 'Unsupported confirmation source.', allowed: ['ACQUIRER', 'BANK_API', 'PSP_WEBHOOK', 'MANUAL_OPERATOR'] });
+      return;
+    }
+
+    try {
+      ctx.db.execute(
+        `INSERT OR IGNORE INTO bank_confirmations (id, merchant_id, receiving_account_id, bank_reference, amount_paise, source, confirmed_by, raw_payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          crypto.randomUUID(),
+          account.merchantId,
+          account.id,
+          bankReferenceNumber,
+          amountPaise,
+          source,
+          req.auth?.actorId || 'operator',
+          JSON.stringify(body.rawPayload || {}),
+          new Date().toISOString()
+        ]
+      );
+    } catch (err) {
+      HttpServer.json(res, 500, { error: `Failed to record bank confirmation: ${err.message}` });
+      return;
+    }
+
+    const result = ctx.attributionEngine.confirmAuthoritativeBankCredit({
+      receivingAccountId: account.id,
+      merchantId: account.merchantId,
+      bankReferenceNumber,
+      amountPaise,
+      source,
+      confirmedBy: req.auth?.actorId || 'operator'
+    });
+
+    ctx.auditRepo.log({
+      merchantId: account.merchantId,
+      entityType: 'BANK_CONFIRMATION',
+      entityId: result.sessionId || bankReferenceNumber,
+      action: 'AUTHORITATIVE_BANK_CONFIRMATION_RECORDED',
+      actorType: AuditActorType.ADMIN,
+      actorId: req.auth?.actorId || 'operator',
+      details: { source, bankReferenceNumber, amountPaise, confirmed: result.confirmed, reason: result.reason }
+    });
+
+    HttpServer.json(res, result.confirmed ? 200 : 202, {
+      recorded: true,
+      confirmed: result.confirmed,
+      paymentId: result.sessionId || null,
+      reason: result.reason || null,
+      message: result.confirmed
+        ? 'Bank credit confirmed authoritatively; the matching payment is now SUCCESS.'
+        : 'Bank credit recorded. No payment could be confirmed from it (see reason).'
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Reconciliation review queue: bank credits that arrived after the checkout
+  // window closed (or could not be matched). Listing/resolving a case never
+  // changes a payment's status; settlement still needs the authoritative
+  // confirmation above.
+  // ---------------------------------------------------------------------------
+  const serializeReviewCase = c => ({
+    id: c.id,
+    merchantId: c.merchantId,
+    receivingAccountId: c.receivingAccountId,
+    paymentSessionId: c.paymentSessionId,
+    observationId: c.observationId,
+    amountPaise: c.amountPaise.toString(),
+    amount: c.amount,
+    bankReference: c.bankReference,
+    source: c.source,
+    reason: c.reason,
+    status: c.status,
+    createdAt: c.createdAt.toISOString(),
+    resolvedAt: c.resolvedAt ? c.resolvedAt.toISOString() : null,
+    resolvedBy: c.resolvedBy,
+    resolutionNote: c.resolutionNote
+  });
+
+  server.get('/api/v1/admin/reconciliation-cases', (req, res) => {
+    if (!ctx.reviewRepo) {
+      HttpServer.json(res, 503, { error: 'Reconciliation queue unavailable.' });
+      return;
+    }
+    const requestedStatus = String(req.query?.status || 'OPEN').toUpperCase();
+    const status = requestedStatus === 'ALL' ? null : requestedStatus;
+    if (status && !['OPEN', 'RESOLVED'].includes(status)) {
+      HttpServer.json(res, 400, { error: 'status must be OPEN, RESOLVED or ALL.' });
+      return;
+    }
+    const merchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : (req.query?.merchantId || null);
+    const cases = ctx.reviewRepo.findAll({ merchantId, status, limit: req.query?.limit });
+    HttpServer.json(res, 200, { cases: cases.map(serializeReviewCase), count: cases.length });
+  });
+
+  server.post('/api/v1/admin/reconciliation-cases/:id/resolve', async (req, res, params) => {
+    if (!ctx.reviewRepo) {
+      HttpServer.json(res, 503, { error: 'Reconciliation queue unavailable.' });
+      return;
+    }
+    const body = await HttpServer.parseBody(req);
+    const note = String(body.note || body.resolutionNote || '').trim();
+    if (note.length < 3) {
+      HttpServer.json(res, 400, { error: 'A short resolution note is required.' });
+      return;
+    }
+    const existing = ctx.reviewRepo.findById(params.id);
+    if (!existing) {
+      HttpServer.json(res, 404, { error: 'Review case not found.' });
+      return;
+    }
+    if (req.auth?.role === 'MERCHANT' && existing.merchantId !== req.auth.merchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant reconciliation access refused.' });
+      return;
+    }
+    const result = ctx.reviewRepo.resolve(params.id, { resolvedBy: req.auth?.actorId || 'operator', note });
+    if (!result.ok) {
+      HttpServer.json(res, 409, { error: result.code, message: 'Case is already closed.' });
+      return;
+    }
+    if (ctx.auditRepo) {
+      ctx.auditRepo.log({
+        merchantId: existing.merchantId,
+        entityType: 'PAYMENT_REVIEW_CASE',
+        entityId: existing.id,
+        action: 'PAYMENT_REVIEW_CASE_RESOLVED',
+        actorType: AuditActorType.ADMIN,
+        actorId: req.auth?.actorId || 'operator',
+        details: { note, observationId: existing.observationId }
+      });
+    }
+    HttpServer.json(res, 200, { resolved: true, case: serializeReviewCase(result.case) });
+  });
+
   // GET /api/v1/admin/tunnel/status - Status of the operator-configured tunnel.
   // The command line is never returned (it carries tunnel credentials) and log lines
   // are scrubbed of tokens before leaving the process (audit P0-01/P0-06).

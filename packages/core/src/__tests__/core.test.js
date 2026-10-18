@@ -206,7 +206,8 @@ describe('@youpi/core Unit & Integration Tests', () => {
       assert.equal(sessionRepo.findById(session.id).status, PaymentStatus.PROCESSING);
 
       // Method 2: Gmail observes the SAME bank reference (UTR111) from an independent
-      // channel -> independently corroborated bank credit -> BANK_CONFIRMED SUCCESS
+      // channel. Corroboration is EVIDENCE, not settlement: without an authenticated
+      // bank/acquirer confirmation the payment must NOT be marked verified.
       const obsGmail = ObservationNormalizer.normalize({
         source: ObserverSource.GMAIL,
         receivingAccountId: receivingAccount.id,
@@ -216,10 +217,22 @@ describe('@youpi/core Unit & Integration Tests', () => {
       });
       const res2 = attributionEngine.processObservation(obsGmail);
       assert.equal(res2.attributed, true);
-      assert.equal(res2.outcomeStatus, PaymentStatus.SUCCESS);
-      assert.equal(res2.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
       assert.equal(res2.verificationLevel, 2);
+      assert.equal(sessionRepo.findById(session.id).status, PaymentStatus.PROCESSING);
+      assert.equal(sessionRepo.findById(session.id).confirmationStatus, ConfirmationStatus.REPORTED);
+
+      // Only an AUTHENTICATED bank/acquirer confirmation settles the payment.
+      const bankResult = attributionEngine.confirmAuthoritativeBankCredit({
+        receivingAccountId: receivingAccount.id,
+        merchantId: defaultMerchant.id,
+        bankReferenceNumber: 'UTR111',
+        amountPaise: 20000n,
+        source: 'ACQUIRER',
+        confirmedBy: 'acquirer-test'
+      });
+      assert.equal(bankResult.confirmed, true);
       assert.equal(sessionRepo.findById(session.id).status, PaymentStatus.SUCCESS);
+      assert.equal(sessionRepo.findById(session.id).confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
 
       // Duplicate test: SMS submits same UTR111 again -> MUST be rejected as DUPLICATE_IGNORED!
       const resSmsDup = attributionEngine.processObservation(obsSms);

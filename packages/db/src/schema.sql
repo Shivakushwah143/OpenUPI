@@ -228,3 +228,24 @@ CREATE INDEX IF NOT EXISTS idx_devices_fingerprint ON devices (fingerprint_hash)
 CREATE INDEX IF NOT EXISTS idx_devices_token ON devices (device_token);
 CREATE INDEX IF NOT EXISTS idx_payment_sessions_device ON payment_sessions (device_id);
 
+
+-- Reconciliation queue for late / unmatchable bank credits (evidence only).
+CREATE TABLE IF NOT EXISTS payment_review_cases (
+    id TEXT PRIMARY KEY,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+    payment_session_id TEXT REFERENCES payment_sessions(id) ON DELETE SET NULL,
+    observation_id TEXT UNIQUE,
+    amount_paise BIGINT NOT NULL,
+    bank_reference TEXT,
+    source TEXT,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    resolved_by TEXT,
+    resolution_note TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_payment_review_status ON payment_review_cases (status, created_at);
+CREATE INDEX IF NOT EXISTS idx_payment_review_merchant ON payment_review_cases (merchant_id, status);

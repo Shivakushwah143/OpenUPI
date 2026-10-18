@@ -20,16 +20,34 @@ object NotificationParser {
         Pattern.CASE_INSENSITIVE
     )
 
-    // Regex matching bank UTR / Reference numbers
+    // Regex matching bank UTR / Reference numbers (BoB "Ref No", Paytm "UPI Ref", "Txn ID", "UPI transaction ID")
     private val REF_PATTERN = Pattern.compile(
-        """(?:utr|ref(?:\s*no)?|txn(?:\s*id)?|rrn)[:\s#]+([a-zA-Z0-9\-_]{6,35})""",
+        """(?:upi\s*ref(?:erence)?|transaction\s*(?:id|ref)|utr|ref(?:erence)?(?:\s*no)?|txn(?:\s*id)?|rrn)[:\s#]+([a-zA-Z0-9\-_]{6,35})""",
         Pattern.CASE_INSENSITIVE
     )
 
-    // Regex matching sender VPA
+    // Regex matching sender VPA, e.g. "from rahul@paytm" or "by rahul@paytm"
     private val VPA_PATTERN = Pattern.compile(
         """(?:from|by)\s+([a-zA-Z0-9.\-_]{2,100}@[a-zA-Z0-9.\-_]{2,64})""",
         Pattern.CASE_INSENSITIVE
+    )
+
+    // Fallback: any VPA appearing in a credit notification (e.g. "₹10 received from Rahul (rahul@paytm)")
+    private val ANY_VPA_PATTERN = Pattern.compile(
+        """([a-zA-Z0-9.\-_]{2,100}@[a-zA-Z0-9.\-_]{2,64})""",
+        Pattern.CASE_INSENSITIVE
+    )
+
+    // Incoming-credit phrasing, including BoB "Cr" shorthand and Paytm P2P wording.
+    private val CREDIT_PATTERN = Regex(
+        """(credited|received|deposit|upi/cr|\bcr\b|sent you|paid you|money added|added to (?:your )?account)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    // Explicit outgoing/debit phrasing. Only used to veto text with no credit word.
+    private val DEBIT_PATTERN = Regex(
+        """(debited|withdrawn|\bdr\b|you sent|you paid|sent rs|sent ₹|paid rs|paid to)""",
+        RegexOption.IGNORE_CASE
     )
 
     // Common Indian UPI and Banking App package prefixes
@@ -61,10 +79,18 @@ object NotificationParser {
         val safeText = text ?: ""
         val combined = "$safeTitle $safeText"
 
-        // Check for credit keywords
-        val creditMatch = Regex("""(credited|received|deposit|payment received|upi/cr)""", RegexOption.IGNORE_CASE)
-        if (!creditMatch.containsMatchIn(combined)) {
+        // Check for incoming-credit direction (Paytm app, Bank of Baroda SMS/app)
+        if (!CREDIT_PATTERN.containsMatchIn(combined)) {
             return null // Skip debits or irrelevant alerts
+        }
+
+        // A debit notification that also carries a generic word (e.g. "transferred")
+        // must never be read as a credit unless a real credit word is present.
+        if (DEBIT_PATTERN.containsMatchIn(combined) &&
+            !Regex("""(credited|received|deposit|sent you|paid you)""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(combined)
+        ) {
+            return null
         }
 
         // Extract Amount
@@ -97,6 +123,12 @@ object NotificationParser {
         val vpaMatcher = VPA_PATTERN.matcher(combined)
         if (vpaMatcher.find()) {
             senderVpa = vpaMatcher.group(1)?.trim()?.trimEnd('.', ',', ';')
+        }
+        if (senderVpa == null) {
+            val anyVpaMatcher = ANY_VPA_PATTERN.matcher(combined)
+            if (anyVpaMatcher.find()) {
+                senderVpa = anyVpaMatcher.group(1)?.trim()?.trimEnd('.', ',', ';')
+            }
         }
 
         return ParsedNotification(
