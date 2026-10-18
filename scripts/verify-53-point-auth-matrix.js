@@ -20,6 +20,7 @@ import {
   findUpiProviderById,
   PaymentStatus,
   PaymentMethod,
+  ConfirmationStatus,
   normalizeEmail,
   normalizeMobile,
   isValidEmail,
@@ -533,8 +534,18 @@ async function run53PointMatrix() {
     });
     assert.equal(obs.attributed, true);
     assert.equal(obs.paymentSessionId, unauthPayment.paymentId);
-    assert.equal(obs.outcomeStatus, PaymentStatus.SUCCESS);
-    console.log('  [✓] Test 36 Passed: Verification engine attributed payment successfully');
+    // A single observer statement is REPORTED evidence only; it never finalizes a
+    // payment without independent bank-credit verification.
+    assert.equal(obs.outcomeStatus, 'REPORTED');
+    console.log('  [✓] Test 36 Passed: Verification engine attributed payment as REPORTED evidence');
+
+    // Release the receiving-account slot for the following tests through the audited
+    // manual-reconciliation confirmation path (never a raw status write).
+    sessionRepo.confirmPaymentSuccess(unauthPayment.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_verifier',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
 
     // ==========================================
     // DEMO STORE (Tests 37 - 40)
@@ -571,7 +582,11 @@ async function run53PointMatrix() {
     assert.equal(bindDemo.body.status, PaymentStatus.ACTIVE);
     assert.ok(bindDemo.body.expiresAt);
     console.log('  [✓] Test 40 Passed: Payment session and timer begin after customer authentication');
-    sessionRepo.transitionToTerminal(demoBuy.body.paymentId, PaymentStatus.SUCCESS);
+    sessionRepo.confirmPaymentSuccess(demoBuy.body.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_verifier',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
 
     // ==========================================
     // MERCHANT INTEGRATION (Tests 41 - 43)
@@ -602,7 +617,11 @@ async function run53PointMatrix() {
     assert.equal(genericBind.body.status, 'ACTIVE');
     assert.equal(genericBind.body.customer.name, 'Gaurav Sharma');
     console.log('  [✓] Test 41, 42, 43 Passed: Generic merchant model verified. Gateway owns customer identity');
-    sessionRepo.transitionToTerminal(genericPay.paymentId, PaymentStatus.SUCCESS);
+    sessionRepo.confirmPaymentSuccess(genericPay.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_verifier',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
 
     // ==========================================
     // REGRESSION (Tests 44 - 53)

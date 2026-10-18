@@ -62,6 +62,9 @@ export class Database {
       this.db.exec('PRAGMA journal_mode = WAL;');
     } catch {}
 
+    // Tracks transaction nesting depth so composed repository calls share ONE ACID unit.
+    this._txDepth = 0;
+
     // Auto-initialize SQLite on first boot if core tables do not exist
     if (!options.inMemory && options.autoMigrate !== false) {
       ensureDatabaseInitialized(this);
@@ -134,7 +137,21 @@ export class Database {
    * @returns {T}
    */
   transaction(callback) {
+    // Nested transactions participate in the OUTERMOST transaction. SQLite has no
+    // true nested BEGIN, and a composed call (e.g. state transition + ledger
+    // reservation) must be one atomic unit: if the inner block throws, the whole
+    // unit rolls back rather than partially committing.
+    if (this._txDepth > 0) {
+      this._txDepth += 1;
+      try {
+        return callback();
+      } finally {
+        this._txDepth -= 1;
+      }
+    }
+
     this.db.exec('BEGIN TRANSACTION;');
+    this._txDepth = 1;
     try {
       const result = callback();
       this.db.exec('COMMIT;');
@@ -146,6 +163,8 @@ export class Database {
         // Ignore rollback error if already rolled back
       }
       throw err;
+    } finally {
+      this._txDepth = 0;
     }
   }
 

@@ -1,5 +1,13 @@
 import crypto from 'node:crypto';
-import { PaymentStatus, PaymentMethod } from '@youpi/common';
+import {
+  PaymentStatus,
+  PaymentMethod,
+  ConfirmationStatus,
+  isTerminalStatus,
+  allowedSourceStatuses,
+  assertValidTransition
+} from '@youpi/common';
+import { BankTransactionRepository } from './bank-transaction.repository.js';
 
 export class PaymentSessionRepository {
   /**
@@ -7,6 +15,25 @@ export class PaymentSessionRepository {
    */
   constructor(db) {
     this.db = db;
+    this.bankTxn = new BankTransactionRepository(db);
+  }
+
+  /**
+   * Enqueues a durable webhook outbox row inside the caller's transaction so
+   * financial state and the outbound notification are persisted atomically
+   * (audit P1-06: at-least-once, survives restarts).
+   * @param {string} paymentId
+   * @param {string} event
+   */
+  _enqueueOutbox(paymentId, event) {
+    const now = new Date().toISOString();
+    this.db.execute(`
+      INSERT INTO payment_events_outbox (id, payment_id, event, flushed, created_at, updated_at)
+      SELECT ?, ?, ?, 0, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM payment_events_outbox WHERE payment_id = ? AND event = ? AND flushed = 0
+      )
+    `, [crypto.randomUUID(), paymentId, event, now, now, paymentId, event]);
   }
 
   create(data) {
@@ -96,15 +123,21 @@ export class PaymentSessionRepository {
       `, [receivingAccountId, PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]);
 
       if (activeRow) {
-        const isStale = (activeRow.status === PaymentStatus.ACTIVE && activeRow.expires_at && new Date(activeRow.expires_at) <= now) ||
-          (activeRow.status === PaymentStatus.PROCESSING && activeRow.processing_expires_at && new Date(activeRow.processing_expires_at) <= now);
+        const isReportedHold = activeRow.confirmation_status === ConfirmationStatus.REPORTED;
+        const isStale = !isReportedHold && (
+          (activeRow.status === PaymentStatus.ACTIVE && activeRow.expires_at && new Date(activeRow.expires_at) <= now) ||
+          (activeRow.status === PaymentStatus.PROCESSING && activeRow.processing_expires_at && new Date(activeRow.processing_expires_at) <= now)
+        );
         if (isStale) {
           const terminalStatus = activeRow.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
-          this.db.execute(`
+          const res = this.db.execute(`
             UPDATE payment_sessions
             SET status = ?, completed_at = ?, updated_at = ?
-            WHERE id = ?
-          `, [terminalStatus, nowIso, nowIso, activeRow.id]);
+            WHERE id = ? AND status = ?
+          `, [terminalStatus, nowIso, nowIso, activeRow.id, activeRow.status]);
+          if (res.changes > 0) {
+            this._enqueueOutbox(activeRow.id, terminalStatus);
+          }
           activeRow = null;
         }
       }
@@ -119,14 +152,25 @@ export class PaymentSessionRepository {
       }
 
       if (!activeRow) {
-        // Slot is vacant! Grant ACTIVE slot
+        // Slot is vacant! Grant ACTIVE slot (conditional CAS on a non-terminal source state)
         const expiresAt = new Date(now.getTime() + durationMs).toISOString();
 
-        this.db.execute(`
+        const activateRes = this.db.execute(`
           UPDATE payment_sessions
           SET status = ?, slot_acquired_at = ?, expires_at = ?, queue_position = 0, updated_at = ?
-          WHERE id = ?
-        `, [PaymentStatus.ACTIVE, nowIso, expiresAt, nowIso, sessionId]);
+          WHERE id = ? AND status IN (?, ?, ?)
+        `, [PaymentStatus.ACTIVE, nowIso, expiresAt, nowIso, sessionId,
+            PaymentStatus.INITIATED, PaymentStatus.QUEUED, PaymentStatus.ACTIVE]);
+
+        if (activateRes.changes === 0) {
+          // CAS lost: session reached a different state concurrently — return actual state.
+          const cur = this.findById(sessionId);
+          return {
+            status: cur ? cur.status : PaymentStatus.INITIATED,
+            queuePosition: cur ? (cur.queuePosition || 0) : 0,
+            expiresAt: cur ? cur.expiresAt : null
+          };
+        }
 
         // Mark receiving account as busy
         this.db.execute(`
@@ -157,8 +201,8 @@ export class PaymentSessionRepository {
         this.db.execute(`
           UPDATE payment_sessions
           SET status = ?, queue_position = ?, updated_at = ?
-          WHERE id = ?
-        `, [PaymentStatus.QUEUED, queuePosition, nowIso, sessionId]);
+          WHERE id = ? AND status IN (?, ?)
+        `, [PaymentStatus.QUEUED, queuePosition, nowIso, sessionId, PaymentStatus.INITIATED, PaymentStatus.QUEUED]);
 
         return {
           status: PaymentStatus.QUEUED,
@@ -202,7 +246,20 @@ export class PaymentSessionRepository {
   }
 
   /**
-   * Transitions session to terminal state (SUCCESS, FAILED, EXPIRED, CANCELLED).
+   * Transitions session to a non-success terminal state (FAILED, EXPIRED, CANCELLED).
+   * A SUCCESS target is always refused here — see confirmPaymentSuccess().
+   *
+   * Enforcement (audit P0-08):
+   * - Target must be permitted by the declared state graph from the CURRENT state.
+   * - Atomic compare-and-swap: `WHERE id = ? AND status = <current>` with an
+   *   affected-rows check; lost races throw instead of silently overwriting.
+   * - Terminal states are final: re-entering them or moving between terminal
+   *   states is refused (idempotent no-op only when the same terminal target).
+   * - SUCCESS is NOT reachable from ordinary observer intake — use
+   *   confirmPaymentSuccess() (counter confirmation / authenticated manual
+   *   bank reconciliation) instead.
+   * - Financial change and webhook outbox row commit in the same transaction.
+   *
    * Atomically releases receiving account slot.
    */
   transitionToTerminal(sessionId, targetStatus, options = {}) {
@@ -210,17 +267,28 @@ export class PaymentSessionRepository {
       const session = this.findById(sessionId);
       if (!session) throw new Error(`Session not found: ${sessionId}`);
 
-      // Terminal states are final
-      const terminalStates = [
-        PaymentStatus.SUCCESS,
-        PaymentStatus.FAILED,
-        PaymentStatus.EXPIRED,
-        PaymentStatus.CANCELLED
-      ];
-
-      if (terminalStates.includes(session.status)) {
-        return session; // already terminal, idempotent
+      // Terminal states are final: only an identical repeated target is a no-op.
+      if (isTerminalStatus(session.status)) {
+        if (session.status === targetStatus) {
+          return session; // already in target terminal state, idempotent
+        }
+        throw new Error(
+          `Illegal payment state transition: Cannot move from '${session.status}' to '${targetStatus}'. Terminal states cannot be reopened.`
+        );
       }
+
+      // SUCCESS is never reachable through the generic terminal transition.
+      // It requires confirmPaymentSuccess() (independent bank-credit verification
+      // or authenticated counter confirmation) — audit P0-08 / Gate B.
+      if (targetStatus === PaymentStatus.SUCCESS) {
+        throw new Error(
+          'Illegal payment state transition: SUCCESS cannot be reached via transitionToTerminal(). ' +
+          'Use confirmPaymentSuccess() with independent bank-credit verification or counter confirmation.'
+        );
+      }
+
+      // Declared state graph must permit this transition (throws otherwise).
+      assertValidTransition(session.status, targetStatus);
 
       const now = new Date().toISOString();
       const attributedObsId = options.attributedObservationId || session.attributedObservationId || null;
@@ -239,11 +307,20 @@ export class PaymentSessionRepository {
         metadata = { ...metadata, replacedBySessionId: options.replacedBySessionId };
       }
 
-      this.db.execute(`
+      const updateRes = this.db.execute(`
         UPDATE payment_sessions
         SET status = ?, completed_at = ?, attributed_observation_id = ?, metadata = ?, updated_at = ?
-        WHERE id = ?
-      `, [targetStatus, now, attributedObsId, JSON.stringify(metadata), now, sessionId]);
+        WHERE id = ? AND status = ?
+      `, [targetStatus, now, attributedObsId, JSON.stringify(metadata), now, sessionId, session.status]);
+
+      if (updateRes.changes !== 1) {
+        throw new Error(
+          `Concurrent payment state update detected for session ${sessionId}: expected status '${session.status}'.`
+        );
+      }
+
+      // Durable outbox row in the SAME transaction as the financial state change.
+      this._enqueueOutbox(sessionId, targetStatus);
 
       // Release slot on receiving account if this session owned it
       if (session.receivingAccountId) {
@@ -258,6 +335,133 @@ export class PaymentSessionRepository {
     });
   }
 
+  /**
+   * Confirms a payment as SUCCESS (the ONLY path that may produce SUCCESS).
+   *
+   * Allowed callers:
+   * - Physical counter confirmation (cash/card) — `allowFromStatuses: [ACTIVE, PROCESSING]`.
+   * - Independent bank-credit verification of an observed UTR (BANK_CONFIRMED).
+   * - Authenticated manual bank reconciliation (`allowFromTerminal: true` is a
+   *   documented, audited reconciliation adjustment for FAILED/EXPIRED sessions;
+   *   observer intake never calls this method).
+   *
+   * Atomic CAS with affected-rows check; ledger reservation for an operator-
+   * supplied UTR happens inside the same transaction; SUCCESS outbox row is
+   * written atomically with the state change.
+   *
+   * @param {string} sessionId
+   * @param {{
+   *   confirmationStatus?: string,
+   *   operatorId?: string,
+   *   confirmationNote?: string,
+   *   attributedObservationId?: string | null,
+   *   bankReferenceNumber?: string | null,
+   *   allowFromStatuses?: string[],
+   *   allowFromTerminal?: boolean
+   * }} [options]
+   * @returns {{ session: any, confirmed: boolean, alreadyConfirmed: boolean }}
+   */
+  confirmPaymentSuccess(sessionId, options = {}) {
+    return this.db.transaction(() => {
+      const session = this.findById(sessionId);
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
+
+      if (session.status === PaymentStatus.SUCCESS) {
+        return { session, confirmed: false, alreadyConfirmed: true };
+      }
+
+      // Declared graph: SUCCESS is reachable from PROCESSING only.
+      const declaredSuccessSources = allowedSourceStatuses(PaymentStatus.SUCCESS);
+      let sourceStatuses;
+      if (options.allowFromStatuses) {
+        // Explicit, audited caller scope (e.g. physical counter sessions start ACTIVE).
+        // Terminal statuses stay opt-in via allowFromTerminal.
+        sourceStatuses = options.allowFromStatuses.filter(
+          s => !isTerminalStatus(s) || options.allowFromTerminal === true
+        );
+      } else if (options.allowFromTerminal) {
+        sourceStatuses = [...declaredSuccessSources,
+          PaymentStatus.FAILED, PaymentStatus.EXPIRED, PaymentStatus.CANCELLED,
+          PaymentStatus.INITIATED, PaymentStatus.QUEUED, PaymentStatus.ACTIVE];
+      } else {
+        sourceStatuses = declaredSuccessSources;
+      }
+
+      if (!sourceStatuses.includes(session.status)) {
+        throw new Error(
+          `Illegal payment state transition: Cannot move from '${session.status}' to 'SUCCESS' via confirmation.`
+        );
+      }
+
+      // Operator-supplied UTR must be reserved inside the same transaction so a
+      // bank reference can never credit a second order.
+      if (options.bankReferenceNumber && session.receivingAccountId) {
+        const reservation = this.bankTxn.reserve({
+          sessionId: session.id,
+          receivingAccountId: session.receivingAccountId,
+          merchantId: session.merchantId,
+          bankReference: options.bankReferenceNumber,
+          amountPaise: session.amountPaise,
+          observedAt: new Date(),
+          observationId: options.attributedObservationId || null,
+          source: 'MANUAL_RECONCILIATION',
+          provenance: 'MANUAL_RECONCILIATION'
+        });
+        if (!reservation.reserved) {
+          throw new Error(
+            `LEDGER_CONFLICT:${reservation.reason}` +
+            (reservation.consumedBySessionId ? ` consumed_by=${reservation.consumedBySessionId}` : '')
+          );
+        }
+      }
+
+      const now = new Date().toISOString();
+      const confirmationStatus = options.confirmationStatus || ConfirmationStatus.MANUAL_RECONCILIATION;
+
+      const updateRes = this.db.execute(`
+        UPDATE payment_sessions
+        SET status = ?,
+            confirmation_status = ?,
+            confirmed_at = ?,
+            confirmed_by = ?,
+            confirmation_note = ?,
+            completed_at = ?,
+            attributed_observation_id = COALESCE(?, attributed_observation_id),
+            updated_at = ?
+        WHERE id = ? AND status = ?
+      `, [
+        PaymentStatus.SUCCESS,
+        confirmationStatus,
+        now,
+        options.operatorId || null,
+        options.confirmationNote || null,
+        now,
+        options.attributedObservationId || null,
+        now,
+        sessionId,
+        session.status
+      ]);
+
+      if (updateRes.changes !== 1) {
+        throw new Error(
+          `Concurrent payment state update detected for session ${sessionId}: expected status '${session.status}'.`
+        );
+      }
+
+      this._enqueueOutbox(sessionId, PaymentStatus.SUCCESS);
+
+      if (session.receivingAccountId) {
+        this.db.execute(`
+          UPDATE payment_receiving_accounts
+          SET is_slot_busy = 0, current_active_session_id = NULL, updated_at = ?
+          WHERE id = ? AND (current_active_session_id = ? OR current_active_session_id IS NULL)
+        `, [now, session.receivingAccountId, sessionId]);
+      }
+
+      return { session: this.findById(sessionId), confirmed: true, alreadyConfirmed: false };
+    });
+  }
+
   findCurrentActiveOrProcessing(receivingAccountId) {
     const row = this.db.queryOne(`
       SELECT * FROM payment_sessions
@@ -267,8 +471,10 @@ export class PaymentSessionRepository {
 
     if (!row) return null;
     const now = new Date();
-    const isStale = (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
-      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now);
+    const isStale =
+      row.confirmation_status !== ConfirmationStatus.REPORTED && (
+      (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
+      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now));
     if (isStale) {
       const terminalStatus = row.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
       this.transitionToTerminal(row.id, terminalStatus);
@@ -288,8 +494,10 @@ export class PaymentSessionRepository {
 
     if (!row) return null;
     const now = new Date();
-    const isStale = (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
-      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now);
+    const isStale =
+      row.confirmation_status !== ConfirmationStatus.REPORTED && (
+      (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
+      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now));
     if (isStale) {
       const terminalStatus = row.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
       this.transitionToTerminal(row.id, terminalStatus);
@@ -314,8 +522,10 @@ export class PaymentSessionRepository {
 
     if (!row) return null;
     const now = new Date();
-    const isStale = (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
-      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now);
+    const isStale =
+      row.confirmation_status !== ConfirmationStatus.REPORTED && (
+      (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
+      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now));
     if (isStale) {
       const terminalStatus = row.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
       this.transitionToTerminal(row.id, terminalStatus);
@@ -340,8 +550,10 @@ export class PaymentSessionRepository {
 
     if (!row) return null;
     const now = new Date();
-    const isStale = (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
-      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now);
+    const isStale =
+      row.confirmation_status !== ConfirmationStatus.REPORTED && (
+      (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
+      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now));
     if (isStale) {
       const terminalStatus = row.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
       this.transitionToTerminal(row.id, terminalStatus);
@@ -376,8 +588,10 @@ export class PaymentSessionRepository {
 
     if (!row) return null;
     const now = new Date();
-    const isStale = (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
-      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now);
+    const isStale =
+      row.confirmation_status !== ConfirmationStatus.REPORTED && (
+      (row.status === PaymentStatus.ACTIVE && row.expires_at && new Date(row.expires_at) <= now) ||
+      (row.status === PaymentStatus.PROCESSING && row.processing_expires_at && new Date(row.processing_expires_at) <= now));
     if (isStale) {
       const terminalStatus = row.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
       this.transitionToTerminal(row.id, terminalStatus);
@@ -446,18 +660,54 @@ export class PaymentSessionRepository {
   }
 
   /**
-   * Records observation confirmation, calculates 2-level verification tier (SMS + Gmail),
-   * updates the verification tag, and transitions to SUCCESS if level >= 1 and shouldFinalize is true.
+   * Records an observation confidence source and updates the verification tier.
+   *
+   * DUAL-TRUTH MODEL (audit P1-01 / instruction 7): an observer claim NEVER
+   * changes the payment status. It marks the session as REPORTED
+   * (confirmation_status='REPORTED') while the payment status stays exactly
+   * where it is (ACTIVE/PROCESSING). Only confirmPaymentSuccess() — counter
+   * confirmation or authenticated manual bank reconciliation — can produce
+   * SUCCESS and hence a fulfillment webhook.
+   *
+   * The bank reference (UTR) is reserved atomically against the canonical
+   * ledger so one bank credit can never credit a second order (P1-02). A
+   * duplicate/conflicting reference throws LEDGER_RESERVATION_FAILED:* and
+   * rolls back the entire recording (requesting reconciliation instead).
+   *
    * @param {string} sessionId
    * @param {string} source E.g. 'GMAIL', 'GOOGLE_MESSAGES'
    * @param {string} observationId
-   * @param {{ finalizeSuccess?: boolean }} [options={}]
-   * @returns {{ session: any, level: number, sources: string[], tag: string, isFirstSuccess: boolean }}
+   * @param {{ finalizeSuccess?: boolean, bankReferenceNumber?: string|null, amountPaise?: bigint|number, observedAt?: Date }} [options={}]
+   *   `finalizeSuccess` is retained for API compatibility and is IGNORED:
+   *   observers are no longer allowed to finalize payments.
+   * @returns {{ session: any, level: number, sources: string[], tag: string, isFirstReport: boolean, reported: boolean }}
    */
   recordVerificationSource(sessionId, source, observationId, options = {}) {
     return this.db.transaction(() => {
       const session = this.findById(sessionId);
       if (!session) throw new Error(`Payment session not found: ${sessionId}`);
+
+      // Reserve/consume the bank reference for THIS session (P1-02).
+      if (options.bankReferenceNumber && session.receivingAccountId) {
+        const reservation = this.bankTxn.reserve({
+          sessionId: session.id,
+          receivingAccountId: session.receivingAccountId,
+          merchantId: session.merchantId,
+          bankReference: options.bankReferenceNumber,
+          amountPaise: options.amountPaise !== undefined && options.amountPaise !== null
+            ? options.amountPaise
+            : session.amountPaise,
+          observedAt: options.observedAt || new Date(),
+          observationId,
+          source
+        });
+        if (!reservation.reserved) {
+          throw new Error(
+            `LEDGER_RESERVATION_FAILED:${reservation.reason}` +
+            (reservation.consumedBySessionId ? ` consumed_by=${reservation.consumedBySessionId}` : '')
+          );
+        }
+      }
 
       // Read current verification sources
       const sourcesSet = new Set(session.verificationSources || []);
@@ -476,40 +726,39 @@ export class PaymentSessionRepository {
         tag = `Dual Verification (${sourceLabels.join(' + ')})`;
       }
 
-      const shouldFinalize = options.finalizeSuccess !== false;
-      const isFirstSuccess = shouldFinalize && session.status !== PaymentStatus.SUCCESS && level >= 1;
-      const targetStatus = shouldFinalize && level >= 1 ? PaymentStatus.SUCCESS : session.status;
+      const wasAlreadyReported = session.confirmationStatus && session.confirmationStatus !== 'UNCONFIRMED';
+
+      // Terminal/unsuccessful sessions record evidence WITHOUT any status or
+      // confirmation change (GATE B: FAILED/EXPIRED/CANCELLED can never become
+      // SUCCESS via observation intake; a SUCCESS session keeps its original
+      // confirmation provenance).
+      const isTerminal = isTerminalStatus(session.status);
+      let targetConfirmation = session.confirmationStatus || ConfirmationStatus.UNCONFIRMED;
+      if (!isTerminal) {
+        targetConfirmation = ConfirmationStatus.REPORTED;
+      }
+
+      const isFirstReport = !wasAlreadyReported && targetConfirmation === ConfirmationStatus.REPORTED;
       const now = new Date().toISOString();
 
       this.db.execute(`
         UPDATE payment_sessions
-        SET status = ?,
+        SET confirmation_status = ?,
             verification_level = ?,
             verification_sources = ?,
             verification_tag = ?,
             attributed_observation_id = COALESCE(attributed_observation_id, ?),
-            completed_at = COALESCE(completed_at, ?),
             updated_at = ?
         WHERE id = ?
       `, [
-        targetStatus,
+        targetConfirmation,
         level,
         JSON.stringify(sources),
         tag,
         observationId,
-        targetStatus === PaymentStatus.SUCCESS ? now : null,
         now,
         sessionId
       ]);
-
-      // If this transition made it terminal SUCCESS, release slot on receiving account
-      if (targetStatus === PaymentStatus.SUCCESS && session.receivingAccountId) {
-        this.db.execute(`
-          UPDATE payment_receiving_accounts
-          SET is_slot_busy = 0, current_active_session_id = NULL, updated_at = ?
-          WHERE id = ? AND current_active_session_id = ?
-        `, [now, session.receivingAccountId, sessionId]);
-      }
 
       const updated = this.findById(sessionId);
       return {
@@ -517,7 +766,10 @@ export class PaymentSessionRepository {
         level,
         sources,
         tag,
-        isFirstSuccess
+        isFirstReport,
+        reported: updated.confirmationStatus === ConfirmationStatus.REPORTED,
+        // Kept for API compatibility: observers can never finalize a payment.
+        isFirstSuccess: false
       };
     });
   }
@@ -555,6 +807,10 @@ export class PaymentSessionRepository {
       verificationLevel: row.verification_level !== undefined && row.verification_level !== null ? Number(row.verification_level) : 0,
       verificationSources: JSON.parse(row.verification_sources || '[]'),
       verificationTag: row.verification_tag || 'UNVERIFIED',
+      confirmationStatus: row.confirmation_status || ConfirmationStatus.UNCONFIRMED,
+      confirmedAt: row.confirmed_at ? new Date(row.confirmed_at) : null,
+      confirmedBy: row.confirmed_by || null,
+      confirmationNote: row.confirmation_note || null,
       metadata: JSON.parse(row.metadata || '{}'),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at)

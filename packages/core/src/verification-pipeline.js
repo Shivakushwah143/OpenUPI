@@ -227,28 +227,15 @@ export class PaymentVerificationPipeline {
     }
 
     if (!session) {
-      // 1. Try finding active or processing session for this specific receiving account
+      // Strictly scoped resolution: only sessions on the observation's OWN
+      // receiving account may be matched. There is deliberately NO merchant-wide
+      // or gateway-wide fallback - an observation submitted against account A must
+      // never touch an order on account B (audit P0-09, P1-03). An unresolvable
+      // observation is left UNATTRIBUTED for manual reconciliation.
       if (input.receivingAccountId) {
         const row = this.db.queryOne(
           `SELECT * FROM payment_sessions WHERE receiving_account_id = ? AND status IN ('ACTIVE', 'PROCESSING') ORDER BY created_at DESC LIMIT 1`,
           [input.receivingAccountId]
-        );
-        if (row) session = this.sessionRepo.mapRow(row);
-      }
-      // 2. If not found (e.g. observer sent dummy ID or account changed), find active session on merchant's active receiving account
-      if (!session) {
-        const row = this.db.queryOne(`
-          SELECT ps.* FROM payment_sessions ps
-          JOIN payment_receiving_accounts ra ON ps.receiving_account_id = ra.id
-          WHERE ra.is_active = 1 AND ps.status IN ('ACTIVE', 'PROCESSING')
-          ORDER BY ps.created_at DESC LIMIT 1
-        `);
-        if (row) session = this.sessionRepo.mapRow(row);
-      }
-      // 3. Fallback to any latest active or processing session
-      if (!session) {
-        const row = this.db.queryOne(
-          `SELECT * FROM payment_sessions WHERE status IN ('ACTIVE', 'PROCESSING') ORDER BY created_at DESC LIMIT 1`
         );
         if (row) session = this.sessionRepo.mapRow(row);
       }
@@ -699,15 +686,36 @@ export class PaymentVerificationPipeline {
     }
 
     // 5. Transaction Reference Already Used Check
-    const priorUsedSession = this.db.queryOne(`
-      SELECT ps.id, ps.order_id
-      FROM payment_sessions ps
-      JOIN payment_observations po ON ps.attributed_observation_id = po.id
-      WHERE ps.status = 'SUCCESS'
-        AND ps.id != ?
-        AND po.bank_reference_number = ?
-      LIMIT 1
-    `, [session.id, bankRef]);
+    // The canonical ledger is authoritative (P1-02): a bank reference is reserved to
+    // exactly one order the moment it is observed, independently of whether that
+    // order has been finally confirmed yet. The observation-based query below is
+    // kept as a secondary check for databases predating the ledger.
+    let priorUsedSession = null;
+    if (bankRef) {
+      const ledgerReservation = this.db.queryOne(`
+        SELECT ps.id, ps.order_id
+        FROM bank_transaction_ledger btl
+        JOIN payment_sessions ps ON ps.id = btl.consumed_by_session_id
+        WHERE btl.receiving_account_id = ?
+          AND btl.bank_reference = ?
+          AND btl.consumed_by_session_id IS NOT NULL
+          AND btl.consumed_by_session_id != ?
+        LIMIT 1
+      `, [receivingAccountId, bankRef, session.id]);
+      if (ledgerReservation) priorUsedSession = ledgerReservation;
+    }
+
+    if (!priorUsedSession) {
+      priorUsedSession = this.db.queryOne(`
+        SELECT ps.id, ps.order_id
+        FROM payment_sessions ps
+        JOIN payment_observations po ON ps.attributed_observation_id = po.id
+        WHERE ps.status = 'SUCCESS'
+          AND ps.id != ?
+          AND po.bank_reference_number = ?
+        LIMIT 1
+      `, [session.id, bankRef]);
+    }
 
     if (priorUsedSession) {
       stage4 = {

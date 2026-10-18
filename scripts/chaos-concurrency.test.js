@@ -17,7 +17,7 @@ import {
   RecoveryEngine,
   ObservationNormalizer
 } from '@youpi/core';
-import { PaymentStatus, ObserverSource, ObservationAttributionStatus } from '@youpi/common';
+import { PaymentStatus, ObserverSource, ObservationAttributionStatus, ConfirmationStatus } from '@youpi/common';
 
 describe('Phase 16: Comprehensive Chaos & Concurrency Verification', () => {
   let db;
@@ -175,14 +175,20 @@ describe('Phase 16: Comprehensive Chaos & Concurrency Verification', () => {
     });
 
     const resSms = attributionEngine.processObservation(obsSms);
+
+    // The first channel is a REPORTED claim only: no fulfillment from one observer.
+    assert.equal(resSms.attributed, true);
+    assert.equal(resSms.outcomeStatus, 'REPORTED');
+    assert.equal(resSms.verificationLevel, 1);
+    assert.equal(sessionRepo.findById(activeSession.id).status, PaymentStatus.PROCESSING);
+
     const resGmail = attributionEngine.processObservation(obsGmail);
 
-    // Multi-channel flood confirms payment at Level 1, then upgrades to Level 2 (Dual Verification)!
-    assert.equal(resSms.attributed, true);
-    assert.equal(resSms.outcomeStatus, PaymentStatus.SUCCESS);
-    assert.equal(resSms.verificationLevel, 1);
-
+    // The second, INDEPENDENT channel reports the SAME bank reference -> the credit
+    // is independently verified and the payment succeeds exactly once.
     assert.equal(resGmail.attributed, true);
+    assert.equal(resGmail.outcomeStatus, PaymentStatus.SUCCESS);
+    assert.equal(resGmail.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
     assert.equal(resGmail.verificationLevel, 2);
 
     // Redundant duplicate from the same source (SMS again) is safely ignored!

@@ -132,8 +132,29 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
 
     assert.equal(obsRes.status, 200);
     assert.equal(obsRes.body.attribution.attributed, true);
-    assert.equal(obsRes.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+    // ONE channel is a claim (REPORTED) only: it can never finalize the payment.
+    assert.equal(obsRes.body.attribution.outcomeStatus, 'REPORTED');
     assert.equal(obsRes.body.attribution.paymentSessionId, paymentIdA);
+
+    const reportA = await request(`/api/v1/payments/${paymentIdA}`);
+    assert.equal(reportA.body.status, 'PROCESSING');
+
+    // 5b. A second INDEPENDENT channel reports the SAME bank reference (UTR-HTTP-999)
+    // -> the bank credit is independently verified and only now the payment succeeds.
+    const confirmObsRes = await request('/api/v1/pollers/events', {
+      method: 'POST',
+      body: {
+        source: ObserverSource.GMAIL,
+        receivingAccountId: '00000000-0000-0000-0000-000000000002',
+        amount: '200.00',
+        utr: 'UTR-HTTP-999',
+        observedAt: new Date().toISOString()
+      }
+    });
+
+    assert.equal(confirmObsRes.status, 200);
+    assert.equal(confirmObsRes.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+    assert.equal(confirmObsRes.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
 
     // 6. Verify Payment A is SUCCESS via public API
     const verifyA = await request(`/api/v1/payments/${paymentIdA}`);
@@ -520,9 +541,9 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
     assert.equal(obs1.body.attribution.verificationLevel, 1);
     assert.ok(obs1.body.attribution.verificationTag.includes('Single Verification') || obs1.body.attribution.verificationTag.includes('SMS'));
 
-    // Check payment status: must be SUCCESS with Level 1
+    // Single-channel claim: recorded with Level 1 evidence, but NOT success yet.
     const checkL1 = await request(`/api/v1/payments/${paymentId}`);
-    assert.equal(checkL1.body.status, 'SUCCESS');
+    assert.equal(checkL1.body.status, PaymentStatus.PROCESSING);
     assert.equal(checkL1.body.verificationLevel, 1);
     assert.deepEqual(checkL1.body.verificationSources, ['GOOGLE_MESSAGES']);
 
@@ -540,9 +561,12 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
 
     assert.equal(obs2.status, 200);
     assert.equal(obs2.body.attribution.verificationLevel, 2);
+    assert.equal(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+    assert.equal(obs2.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
     assert.ok(obs2.body.attribution.verificationTag.includes('Dual Verification'));
 
     const checkL2 = await request(`/api/v1/payments/${paymentId}`);
+    assert.equal(checkL2.body.status, 'SUCCESS');
     assert.equal(checkL2.body.verificationLevel, 2);
     assert.ok(checkL2.body.verificationSources.includes('GOOGLE_MESSAGES'));
     assert.ok(checkL2.body.verificationSources.includes('GMAIL'));
@@ -607,13 +631,14 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(getAllRes.body.webhookUrl, receiverUrl);
       assert.equal(getAllRes.body.webhookSecret, customSecret);
 
-      // 5. Create a payment session
+      // 5. Create a physical counter payment session (SUCCESS for a non-counter UPI
+      // session is no longer reachable through counter confirmation).
       const createRes = await request('/api/v1/payments', {
         method: 'POST',
         body: {
           orderId: 'WEBHOOK-TEST-ORD-1',
           amount: '450.00',
-          autoActivate: true
+          method: 'CASH_COUNTER'
         }
       });
       assert.equal(createRes.status, 201);
@@ -678,7 +703,7 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
     }
   });
 
-  test('Auto-detection in ACTIVE state without Payment Done click: immediate SUCCESS, L1 to L2 upgrade, exactly 1 webhook', async () => {
+  test('Auto-detection in ACTIVE state without Payment Done click: single channel reports, second independent channel confirms, exactly 1 webhook', async () => {
     // 1. Clean slot and queue
     testDb.execute(`
       UPDATE payment_sessions
@@ -748,24 +773,20 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       assert.equal(obs1.status, 200);
       assert.equal(obs1.body.attribution.attributed, true);
       assert.equal(obs1.body.attribution.verificationLevel, 1);
+      assert.equal(obs1.body.attribution.outcomeStatus, 'REPORTED');
 
-      // Payment MUST be immediately SUCCESS for customer
+      // A single claim keeps the payment pending: no SUCCESS, no fulfillment, no webhook.
       const checkAfterObs1 = await request(`/api/v1/payments/${paymentId}`);
-      assert.equal(checkAfterObs1.body.status, 'SUCCESS');
+      assert.equal(checkAfterObs1.body.status, PaymentStatus.ACTIVE);
       assert.equal(checkAfterObs1.body.verificationLevel, 1);
 
-      // Checkout state MUST reflect SUCCESS immediately
       const stateAfterObs1 = await request(`/api/v1/checkout/${paymentId}/state`);
-      assert.equal(stateAfterObs1.body.status, 'SUCCESS');
+      assert.notEqual(stateAfterObs1.body.status, 'SUCCESS');
 
-      // Wait 150ms for webhook dispatch
       await new Promise(r => setTimeout(r, 150));
-      assert.equal(webhookDeliveries.length, 1);
-      assert.equal(webhookDeliveries[0].body.event, 'SUCCESS');
-      assert.equal(webhookDeliveries[0].body.orderId, 'AUTODETECT-ORD-777');
-      assert.equal(webhookDeliveries[0].body.amount, '320.00');
+      assert.equal(webhookDeliveries.length, 0);
 
-      // 6. Channel 2: Gmail credit notification arrives 500ms later during verification sweep
+      // 6. Channel 2: Gmail credit notification for the SAME bank reference (UTR-NOCLICK-999)
       const obs2 = await request('/api/v1/pollers/events', {
         method: 'POST',
         body: {
@@ -778,13 +799,34 @@ describe('Payment API End-to-End HTTP Integration Tests', () => {
       });
       assert.equal(obs2.status, 200);
       assert.equal(obs2.body.attribution.verificationLevel, 2);
+      assert.equal(obs2.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+      assert.equal(obs2.body.attribution.confirmationStatus, 'BANK_CONFIRMED');
 
       // Invariant: Verification level in admin upgrades to L2 (Dual Verification)
       const checkAfterObs2 = await request(`/api/v1/payments/${paymentId}`);
+      assert.equal(checkAfterObs2.body.status, PaymentStatus.SUCCESS);
       assert.equal(checkAfterObs2.body.verificationLevel, 2);
       assert.deepEqual(checkAfterObs2.body.verificationSources.sort(), ['GMAIL', 'GOOGLE_MESSAGES'].sort());
 
-      // Invariant: Second observation MUST NOT trigger duplicate webhook delivery!
+      // Wait 150ms for webhook dispatch (exactly ONE delivery for the confirmed payment)
+      await new Promise(r => setTimeout(r, 150));
+      assert.equal(webhookDeliveries.length, 1);
+      assert.equal(webhookDeliveries[0].body.event, 'SUCCESS');
+      assert.equal(webhookDeliveries[0].body.orderId, 'AUTODETECT-ORD-777');
+      assert.equal(webhookDeliveries[0].body.amount, '320.00');
+
+      // Invariant: A further observation of the same credit MUST NOT trigger a duplicate webhook!
+      const obs3 = await request('/api/v1/pollers/events', {
+        method: 'POST',
+        body: {
+          source: 'SMS_GATEWAY',
+          receivingAccountId: '00000000-0000-0000-0000-000000000002',
+          amount: '320.00',
+          utr: 'UTR-NOCLICK-999',
+          observedAt: new Date().toISOString()
+        }
+      });
+      assert.equal(obs3.status, 200);
       await new Promise(r => setTimeout(r, 150));
       assert.equal(webhookDeliveries.length, 1); // Exactly 1 delivery!
 

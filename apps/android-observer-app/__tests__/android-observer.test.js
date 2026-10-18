@@ -63,7 +63,7 @@ describe('Android Payment Observer Integration Tests', () => {
     assert.ok(res.body.error.includes('validity window'));
   });
 
-  test('submits valid HMAC-signed observation and confirms payment in Payment API', async () => {
+  test('submits valid HMAC-signed observation, records REPORTED evidence, and does not finalize the payment alone', async () => {
     // 1. Create and activate a payment session for ₹350
     const session = apiInstance.app.context.sessionRepo.create({
       merchantId: '00000000-0000-0000-0000-000000000001',
@@ -88,10 +88,13 @@ describe('Android Payment Observer Integration Tests', () => {
     assert.equal(res.body.accepted, true);
     assert.equal(res.body.attribution.attributed, true);
     assert.equal(res.body.attribution.paymentSessionId, session.id);
-    assert.equal(res.body.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+    // A single signed observation is evidence (REPORTED): it never finalizes a
+    // payment without independent bank-credit verification (audit P1-01 / Gate B).
+    assert.equal(res.body.attribution.outcomeStatus, 'REPORTED');
 
-    // 3. Verify session in DB updated to SUCCESS
+    // 3. Verify session in DB stays pending with REPORTED confirmation provenance
     const updated = apiInstance.app.context.sessionRepo.findById(session.id);
-    assert.equal(updated.status, PaymentStatus.SUCCESS);
+    assert.equal(updated.status, PaymentStatus.PROCESSING);
+    assert.equal(updated.confirmationStatus, 'REPORTED');
   });
 });

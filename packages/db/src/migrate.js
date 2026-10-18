@@ -11,6 +11,21 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
+ * Resolves the seed/default merchant API key for environments where the
+ * merchant has not stored one yet. Production never uses a predictable value:
+ * a random key is generated (and must be retrieved from the DB or rotated
+ * through the authenticated admin API).
+ * @returns {string}
+ */
+function resolveDefaultMerchantApiKey() {
+  if (process.env.MERCHANT_API_KEY) return process.env.MERCHANT_API_KEY;
+  if (process.env.OPENUPI_MERCHANT_API_KEY) return process.env.OPENUPI_MERCHANT_API_KEY;
+  if (process.env.NODE_ENV === 'test') return 'test_merchant_api_key_123';
+  if (process.env.NODE_ENV !== 'production') return 'dev_merchant_api_key';
+  return crypto.randomBytes(24).toString('hex');
+}
+
+/**
  * Runs database migrations and applies base seeds.
  * @param {import('./database.js').Database} [targetDb]
  */
@@ -19,7 +34,10 @@ export function runMigrations(targetDb) {
   const schemaPath = path.join(__dirname, 'sqlite-schema.sql');
   const schemaSql = fs.readFileSync(schemaPath, 'utf8');
 
-  // Detect if customers table has obsolete schema (phone_number/merchant_id instead of email/mobile_number or password_hash NOT NULL)
+  // Detect if customers table has obsolete schema (phone_number/merchant_id instead of email/mobile_number or password_hash NOT NULL).
+  // Destructive rebuild is now OPT-IN only (ALLOW_DESTRUCTIVE_MIGRATION=true).
+  // Default behavior preserves existing customer/session/ticket records (P1-09):
+  // an incompatible legacy schema fails the migration instead of silently wiping data.
   try {
     const tableInfo = db.query ? db.query("PRAGMA table_info(customers)") : [];
     const colNames = (tableInfo || []).map(c => c.name);
@@ -31,18 +49,32 @@ export function runMigrations(targetDb) {
       tableInfo.some(c => c.name === 'password_hash' && c.notnull === 1)
     );
     if (hasOldColumns) {
-      try { db.exec("PRAGMA foreign_keys = OFF;"); } catch {}
-      try { db.exec("UPDATE payment_sessions SET customer_id = NULL WHERE customer_id IS NOT NULL;"); } catch {}
-      try { db.exec("DELETE FROM ticket_messages;"); } catch {}
-      try { db.exec("DELETE FROM support_tickets;"); } catch {}
-      try { db.exec("DROP TABLE IF EXISTS customer_sessions;"); } catch {}
-      try { db.exec("DROP TABLE IF EXISTS customers;"); } catch {}
-      try { db.exec("PRAGMA foreign_keys = ON;"); } catch {}
+      if (process.env.ALLOW_DESTRUCTIVE_MIGRATION === 'true') {
+        // Explicit operator opt-in: legacy schema rebuild (will drop customer identity tables).
+        try { db.exec("PRAGMA foreign_keys = OFF;"); } catch {}
+        try { db.exec("UPDATE payment_sessions SET customer_id = NULL WHERE customer_id IS NOT NULL;"); } catch {}
+        try { db.exec("DELETE FROM ticket_messages;"); } catch {}
+        try { db.exec("DELETE FROM support_tickets;"); } catch {}
+        try { db.exec("DROP TABLE IF EXISTS customer_sessions;"); } catch {}
+        try { db.exec("DROP TABLE IF EXISTS customers;"); } catch {}
+        try { db.exec("PRAGMA foreign_keys = ON;"); } catch {}
+      } else {
+        throw new Error(
+          'Migration blocked: existing "customers" table has an incompatible legacy schema. ' +
+          'Automatic data-destructive migration is disabled by default. ' +
+          'Back up the database, then re-run with ALLOW_DESTRUCTIVE_MIGRATION=true to rebuild customer identity tables.'
+        );
+      }
     }
-  } catch {
-    try { db.exec("PRAGMA foreign_keys = OFF;"); } catch {}
-    try { db.exec("DROP TABLE IF EXISTS customers;"); } catch {}
-    try { db.exec("PRAGMA foreign_keys = ON;"); } catch {}
+  } catch (err) {
+    if (err && typeof err.message === 'string' && err.message.startsWith('Migration blocked:')) {
+      throw err;
+    }
+    // Unknown inspection failure: fail closed instead of dropping customer data (P1-09).
+    throw new Error(
+      `Migration blocked: unable to verify customers table schema (${err?.message || 'unknown error'}). ` +
+      'Refusing to run destructive migration by default. Back up the database and re-run with ALLOW_DESTRUCTIVE_MIGRATION=true if a legacy rebuild is intended.'
+    );
   }
 
   // Fallback alter columns if customers/sessions table exists without new columns
@@ -67,6 +99,43 @@ export function runMigrations(targetDb) {
   try { db.exec("ALTER TABLE payment_sessions ADD COLUMN verification_level INTEGER DEFAULT 0;"); } catch {}
   try { db.exec("ALTER TABLE payment_sessions ADD COLUMN verification_sources TEXT DEFAULT '[]';"); } catch {}
   try { db.exec("ALTER TABLE payment_sessions ADD COLUMN verification_tag TEXT DEFAULT 'UNVERIFIED';"); } catch {}
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN confirmation_status TEXT NOT NULL DEFAULT 'UNCONFIRMED';"); } catch {}
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN confirmed_at TEXT;"); } catch {}
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN confirmed_by TEXT;"); } catch {}
+  try { db.exec("ALTER TABLE payment_sessions ADD COLUMN confirmation_note TEXT;"); } catch {}
+  try { db.exec("ALTER TABLE merchants ADD COLUMN api_key TEXT;"); } catch {}
+  // Canonical bank transaction ledger + durable webhook outbox (idempotent DDL).
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS bank_transaction_ledger (
+      id TEXT PRIMARY KEY,
+      receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+      merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+      bank_reference TEXT,
+      amount_paise INTEGER NOT NULL,
+      observed_at TEXT,
+      first_observation_id TEXT,
+      first_source TEXT,
+      consumed_by_session_id TEXT REFERENCES payment_sessions(id) ON DELETE SET NULL,
+      provenance TEXT NOT NULL DEFAULT 'OBSERVED',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `); } catch {}
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_txn_unique_ref ON bank_transaction_ledger (receiving_account_id, bank_reference) WHERE bank_reference IS NOT NULL;"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_bank_txn_consumer ON bank_transaction_ledger (consumed_by_session_id);"); } catch {}
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_events_outbox (
+      id TEXT PRIMARY KEY,
+      payment_id TEXT NOT NULL REFERENCES payment_sessions(id) ON DELETE CASCADE,
+      event TEXT NOT NULL,
+      flushed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `); } catch {}
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_pending_event ON payment_events_outbox (payment_id, event) WHERE flushed = 0;"); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_outbox_pending ON payment_events_outbox (flushed, created_at);"); } catch {}
+  // P2-03: independent unique constraint for merchant idempotency keys.
+  try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_idempotency ON payment_sessions (merchant_id, idempotency_key) WHERE idempotency_key IS NOT NULL;"); } catch {}
   try { db.exec("ALTER TABLE payment_receiving_accounts ADD COLUMN is_merchant_enabled INTEGER NOT NULL DEFAULT 1;"); } catch {}
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_vpa_per_merchant ON payment_receiving_accounts (merchant_id) WHERE is_active = 1;"); } catch {}
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_email ON customers (email);"); } catch {}
@@ -131,6 +200,16 @@ export function runMigrations(targetDb) {
         webhookUrl: 'http://localhost:5000/api/webhook',
         webhookSecret: 'merchant_webhook_secret_for_wallet_store'
       });
+    }
+  }
+
+  // Ensure every merchant has a merchant API key (used to authenticate
+  // merchant-server API calls such as payment creation). Production without
+  // MERCHANT_API_KEY gets a random key that must be read from the database or
+  // rotated via the authenticated admin API; dev/test get documented local defaults.
+  for (const m of merchantRepo.findAll()) {
+    if (!m.apiKey) {
+      merchantRepo.update(m.id, { apiKey: resolveDefaultMerchantApiKey() });
     }
   }
 

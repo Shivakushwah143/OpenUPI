@@ -21,6 +21,7 @@ import {
   findUpiProviderById,
   PaymentStatus,
   PaymentMethod,
+  ConfirmationStatus,
   normalizeEmail,
   normalizeMobile,
   isValidEmail,
@@ -406,7 +407,19 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     });
     assert.equal(obs.attributed, true);
     assert.equal(obs.paymentSessionId, unauthPayment.paymentId);
-    assert.equal(obs.outcomeStatus, PaymentStatus.SUCCESS);
+    // A single observer statement is recorded as REPORTED evidence only: it can no
+    // longer finalize the payment without independent bank-credit verification.
+    assert.equal(obs.outcomeStatus, 'REPORTED');
+    assert.equal(sessionRepo.findById(unauthPayment.paymentId).status, PaymentStatus.ACTIVE);
+
+    // Release the receiving-account slot for the following tests through the
+    // audited manual-reconciliation confirmation path (never a raw status write).
+    sessionRepo.confirmPaymentSuccess(unauthPayment.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_test_operator',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
+    assert.equal(sessionRepo.findById(unauthPayment.paymentId).status, PaymentStatus.SUCCESS);
 
     // --- DEMO STORE (37 - 40) ---
     // 37 & 38. Demo Purchase redirects without storefront auth
@@ -431,8 +444,12 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     assert.equal(bindDemo.body.status, PaymentStatus.ACTIVE);
     assert.ok(bindDemo.body.expiresAt);
 
-    // Complete demo payment to free slot for next test
-    sessionRepo.transitionToTerminal(demoBuy.body.paymentId, PaymentStatus.SUCCESS);
+    // Complete demo payment to free slot for next test (synthetic reconciliation)
+    sessionRepo.confirmPaymentSuccess(demoBuy.body.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_test_operator',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
     testDb.execute('UPDATE payment_receiving_accounts SET is_slot_busy = 0, current_active_session_id = NULL WHERE id = ?', [receivingAccount.id]);
 
     // --- MERCHANT INTEGRATION (41 - 43) ---
@@ -453,8 +470,12 @@ test('Full 53-Point Customer Identity, Authentication & Payment Invariant Matrix
     assert.equal(genericBind.body.status, 'ACTIVE');
     assert.equal(genericBind.body.customer.name, 'Gaurav Sharma');
 
-    // Complete generic payment to free slot for queue tests
-    sessionRepo.transitionToTerminal(genericPay.paymentId, PaymentStatus.SUCCESS);
+    // Complete generic payment to free slot for queue tests (synthetic reconciliation)
+    sessionRepo.confirmPaymentSuccess(genericPay.paymentId, {
+      confirmationStatus: ConfirmationStatus.MANUAL_RECONCILIATION,
+      operatorId: 'matrix_test_operator',
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]
+    });
     testDb.execute('UPDATE payment_receiving_accounts SET is_slot_busy = 0, current_active_session_id = NULL WHERE id = ?', [receivingAccount.id]);
 
     // --- REGRESSION (44 - 53) ---

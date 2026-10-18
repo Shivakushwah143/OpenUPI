@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { HttpServer } from '../server.js';
-import { PaymentStatus, PaymentMethod, SellingMode, AuditActorType, isValidVpa, toRupeesString, deriveCloudflareRoutes, resolveRuntimeUrls } from '@youpi/common';
+import { PaymentStatus, PaymentMethod, SellingMode, AuditActorType, ConfirmationStatus, isValidVpa, toRupeesString, deriveCloudflareRoutes, resolveRuntimeUrls } from '@youpi/common';
 import { PaymentVerificationPipeline } from '@youpi/core';
 import { globalTunnelManager } from '../services/tunnel-manager.js';
 import { formatQrDataUrl } from '../services/whatsapp-berry.service.js';
@@ -277,7 +277,15 @@ export function registerAdminRoutes(server, ctx) {
       return;
     }
 
-    const updated = ctx.sessionRepo.transitionToTerminal(paymentId, PaymentStatus.SUCCESS);
+    // SUCCESS is only reachable through confirmPaymentSuccess(): physical counter
+    // sessions start ACTIVE and are confirmed by an operator at the till, while
+    // UPI sessions require independent bank-credit verification (audit P0-08).
+    const { session: updated } = ctx.sessionRepo.confirmPaymentSuccess(paymentId, {
+      confirmationStatus: ConfirmationStatus.COUNTER_CONFIRMED,
+      operatorId,
+      allowFromStatuses: [PaymentStatus.ACTIVE, PaymentStatus.PROCESSING],
+      confirmationNote: `Counter confirmation (${method || PaymentMethod.CASH_COUNTER}) by operator ${operatorId}`
+    });
 
     ctx.auditRepo.log({
       merchantId: session.merchantId,
@@ -1294,15 +1302,23 @@ export function registerAdminRoutes(server, ctx) {
     try {
       // Find all non-terminal UPI sessions (INITIATED, QUEUED, ACTIVE, PROCESSING) so they are ALL immediately expired!
       const sessionsToExpire = ctx.db.query(`
-        SELECT id, receiving_account_id FROM payment_sessions
+        SELECT id, status, receiving_account_id FROM payment_sessions
         WHERE status IN ('INITIATED', 'QUEUED', 'ACTIVE', 'PROCESSING')
           AND (merchant_id = ? OR ? = '00000000-0000-0000-0000-000000000001')
       `, [merchantId, merchantId]);
 
       for (const s of sessionsToExpire) {
-        ctx.sessionRepo.transitionToTerminal(s.id, PaymentStatus.EXPIRED);
-        server.broadcastSse(s.id, 'status_change', { status: PaymentStatus.EXPIRED });
-        server.broadcastSse(s.id, 'state_change', { status: PaymentStatus.EXPIRED });
+        // A session whose slot was already used (PROCESSING) fails instead of expiring:
+        // each state follows its own declared transition out of the queue.
+        const target = s.status === PaymentStatus.PROCESSING ? PaymentStatus.FAILED : PaymentStatus.EXPIRED;
+        try {
+          ctx.sessionRepo.transitionToTerminal(s.id, target);
+        } catch (err) {
+          // Concurrent terminal state (already succeeded/failed): keep clearing the rest.
+          continue;
+        }
+        server.broadcastSse(s.id, 'status_change', { status: target });
+        server.broadcastSse(s.id, 'state_change', { status: target });
       }
 
       // Free all receiving account slots

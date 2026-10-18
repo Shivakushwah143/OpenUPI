@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { Database } from '@youpi/db';
-import { PaymentStatus, PaymentMethod } from '@youpi/common';
+import { PaymentStatus, PaymentMethod, ConfirmationStatus } from '@youpi/common';
 import { startServer } from '../index.js';
 
 describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', () => {
@@ -65,8 +65,9 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     assert.equal(q1Updated.status, PaymentStatus.EXPIRED);
     assert.equal(q2Updated.status, PaymentStatus.EXPIRED);
 
-    // Clean up sActive so receiving account slot is released
-    sessionRepo.transitionToTerminal(sActive.id, PaymentStatus.SUCCESS);
+    // The active session was expired by the same sweep, releasing the slot.
+    // (Terminal states are final and can never be reopened.)
+    assert.equal(sessionRepo.findById(sActive.id).status, PaymentStatus.EXPIRED);
   });
 
   test('Detects active session conflict when customer already has an active session', async () => {
@@ -185,10 +186,15 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     assert.equal(smsResult.attribution.attributed, true);
     assert.equal(smsResult.attribution.paymentSessionId, s450.id);
 
-    // 1st hit (SMS Gateway) -> Level 1 verification recorded
+    // 1st hit (SMS Gateway) -> Level 1 verification recorded as a REPORTED claim only
     assert.equal(smsResult.attribution.verificationLevel, 1);
 
-    // 2nd hit arrives from Gmail poller within 5s grace window -> upgrades to Level 2 Dual Verification
+    // A signed bank SMS alone is NEVER enough: the payment stays non-successful.
+    const sAfterSms = sessionRepo.findById(s450.id);
+    assert.equal(sAfterSms.status, PaymentStatus.ACTIVE);
+    assert.equal(sAfterSms.confirmationStatus, ConfirmationStatus.REPORTED);
+
+    // 2nd hit arrives from Gmail poller within the corroboration window -> Level 2 evidence
     const gmailRes = await fetch(`${baseUrl}/api/v1/pollers/events`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -207,10 +213,43 @@ describe('2-Level Verification (SMS Gateway + Gmail) & Queue Management Tests', 
     assert.equal(gmailResult.attribution.verificationLevel, 2);
     assert.ok(gmailResult.attribution.verificationTag.includes('Dual Verification'));
 
-    // Verify session in DB is now SUCCESS and Level 2
+    // Two different channels that do NOT reference the same bank transaction are still
+    // only evidence: the payment must NOT be SUCCESS yet (audit P1-01).
+    const sAfterGmail = sessionRepo.findById(s450.id);
+    assert.equal(sAfterGmail.status, PaymentStatus.ACTIVE);
+    assert.equal(sAfterGmail.confirmationStatus, ConfirmationStatus.REPORTED);
+
+    // 3rd hit: a second independent channel reports the SAME bank reference (UTR) as the
+    // first SMS -> independently corroborated bank credit -> BANK_CONFIRMED SUCCESS.
+    const smsObservation = testDb.queryOne(
+      "SELECT bank_reference_number FROM payment_observations WHERE attributed_payment_id = ? AND bank_reference_number IS NOT NULL LIMIT 1",
+      [s450.id]
+    );
+    assert.ok(smsObservation?.bank_reference_number);
+
+    const corroborateRes = await fetch(`${baseUrl}/api/v1/pollers/events`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source: 'GOOGLE_MESSAGES',
+        receivingAccountId,
+        amountPaise: '45000',
+        amount: '450.00',
+        bankReferenceNumber: smsObservation.bank_reference_number,
+        observedAt: new Date().toISOString()
+      })
+    });
+    assert.equal(corroborateRes.status, 200);
+    const corroborateData = await corroborateRes.json();
+    assert.equal(corroborateData.attribution.attributed, true);
+    assert.equal(corroborateData.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+    assert.equal(corroborateData.attribution.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
+
+    // Verify session in DB is now SUCCESS with bank-credit provenance
     const sUpdated = sessionRepo.findById(s450.id);
     assert.equal(sUpdated.status, PaymentStatus.SUCCESS);
-    assert.equal(sUpdated.verificationLevel, 2);
+    assert.equal(sUpdated.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
+    assert.ok(sUpdated.confirmedAt);
   });
 
   test('Gmail credentials can be saved and connection tested via Admin API', async () => {

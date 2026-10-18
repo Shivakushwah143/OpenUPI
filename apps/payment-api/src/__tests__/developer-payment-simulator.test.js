@@ -575,7 +575,7 @@ describe('Feature 65: Developer Payment Simulator Integration & Acceptance Suite
     assert.equal(res3.body.reason, 'REFERENCE_ALREADY_USED');
   });
 
-  test('28, 29, 30. Valid synthetic observation reaches normal VERIFIED status, updates session, and emits SSE', async () => {
+  test('28, 29, 30. Valid synthetic observation reaches normal VERIFIED status, records evidence, and does NOT finalize the payment alone', async () => {
     resetSlot();
     await enableTestMode();
 
@@ -614,14 +614,16 @@ describe('Feature 65: Developer Payment Simulator Integration & Acceptance Suite
     assert.equal(res.body.stages.stage5.status, 'PASSED');
     assert.equal(res.body.stages.stage6.status, 'ATTRIBUTED');
 
-    // Verify session in database transitioned to SUCCESS
-    const sessionDb = testDb.db.prepare('SELECT status FROM payment_sessions WHERE id = ?').get(sessId);
-    assert.equal(sessionDb.status, 'SUCCESS');
+    // One synthetic SMS is evidence only: the payment is REPORTED, never SUCCESS,
+    // and independent bank-credit verification is still required.
+    const sessionDb = testDb.db.prepare('SELECT status, confirmation_status FROM payment_sessions WHERE id = ?').get(sessId);
+    assert.equal(sessionDb.status, 'ACTIVE');
+    assert.equal(sessionDb.confirmation_status, 'REPORTED');
 
-    // Normal checkout state now reports SUCCESS
+    // Normal checkout state still shows the pending payment (no fulfillment yet)
     const stateAfter = await request(`/api/v1/checkout/${sessId}/state`);
     assert.equal(stateAfter.status, 200);
-    assert.equal(stateAfter.body.status, 'SUCCESS');
+    assert.equal(stateAfter.body.status, 'ACTIVE');
   });
 
   test('33. Simulation event is audit logged with full evidence and accessible via history', async () => {

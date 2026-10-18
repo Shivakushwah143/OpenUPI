@@ -1,5 +1,5 @@
 import { HttpServer } from '../server.js';
-import { toRupeesString, buildUpiUri, PaymentStatus, PaymentMethod, UPI_PROVIDERS } from '@youpi/common';
+import { toRupeesString, buildUpiUri, PaymentStatus, PaymentMethod, ConfirmationStatus, UPI_PROVIDERS } from '@youpi/common';
 import { validateSessionDeviceAccess } from '@youpi/core';
 
 /**
@@ -1227,30 +1227,36 @@ export function registerCheckoutRoutes(server, ctx) {
       }
     }
 
-    // Update payment session to SUCCESS with COD method and release slot
+    // Update payment session to SUCCESS with COD method and release slot.
+    // COD is an order acceptance (no bank credit involved), so it still goes
+    // through the single atomic confirmation path with explicit COD provenance —
+    // SUCCESS must never bypass the state machine or the CAS guard (audit P0-08).
     const nowIso = new Date().toISOString();
     const oldReceivingAccountId = session.receivingAccountId || session.receiving_account_id;
+
+    ctx.sessionRepo.confirmPaymentSuccess(session.id, {
+      confirmationStatus: ConfirmationStatus.COD_ORDER_PLACED,
+      allowFromStatuses: [
+        PaymentStatus.INITIATED,
+        PaymentStatus.QUEUED,
+        PaymentStatus.ACTIVE,
+        PaymentStatus.PROCESSING
+      ],
+      confirmationNote: 'Cash on Delivery order placed by customer'
+    });
 
     ctx.sessionRepo.db.execute(`
       UPDATE payment_sessions
       SET method = 'COD',
-          status = 'SUCCESS',
           verification_tag = 'COD_ORDER_PLACED',
           verification_level = 1,
-          completed_at = ?,
           receiving_account_id = NULL,
           updated_at = ?
-      WHERE id = ?
-    `, [nowIso, nowIso, session.id]);
+      WHERE id = ? AND status = ?
+    `, [nowIso, session.id, PaymentStatus.SUCCESS]);
 
-    // Release receiving account slot and promote next queued customer
+    // Slot was released atomically by confirmPaymentSuccess: promote next queued customer
     if (oldReceivingAccountId) {
-      ctx.sessionRepo.db.execute(`
-        UPDATE payment_receiving_accounts
-        SET is_slot_busy = 0, current_active_session_id = NULL, updated_at = ?
-        WHERE id = ?
-      `, [nowIso, oldReceivingAccountId]);
-
       const promoted = ctx.queueEngine.promoteNext(oldReceivingAccountId);
       if (promoted) {
         if (promoted.expiresAt && ctx.timingEngine) {

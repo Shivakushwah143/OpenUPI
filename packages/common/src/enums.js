@@ -59,7 +59,32 @@ export const ObservationAttributionStatus = Object.freeze({
   UNATTRIBUTED: 'UNATTRIBUTED',
   ATTRIBUTED: 'ATTRIBUTED',
   LATE_UNMATCHED: 'LATE_UNMATCHED',
-  DUPLICATE_IGNORED: 'DUPLICATE_IGNORED'
+  DUPLICATE_IGNORED: 'DUPLICATE_IGNORED',
+  /** Evidence was reported but cannot be attributed automatically (ambiguity,
+   * duplicate bank reference, cross-tenant mismatch) and requires manual
+   * bank reconciliation. Never a success by itself. */
+  RECONCILIATION_REQUIRED: 'RECONCILIATION_REQUIRED',
+  /** Observation references a bank transaction already consumed by another order. */
+  DUPLICATE_TRANSACTION: 'DUPLICATE_TRANSACTION'
+});
+
+/**
+ * Payment confirmation provenance (dual-truth model):
+ * - REPORTED: an observer (SMS/email/android) CLAIMED a credit. Never sufficient
+ *   to fulfill an order by itself.
+ * - MANUAL_RECONCILIATION: an authenticated operator matched the credit against
+ *   the bank account statement.
+ * - COUNTER_CONFIRMED: physical cash/card counter confirmation by an operator.
+ * - BANK_CONFIRMED: reserved for an authoritative bank/acquirer confirmation channel.
+ */
+export const ConfirmationStatus = Object.freeze({
+  UNCONFIRMED: 'UNCONFIRMED',
+  REPORTED: 'REPORTED',
+  MANUAL_RECONCILIATION: 'MANUAL_RECONCILIATION',
+  COUNTER_CONFIRMED: 'COUNTER_CONFIRMED',
+  BANK_CONFIRMED: 'BANK_CONFIRMED',
+  /** Cash-on-delivery order accepted: no money received yet, fulfillment happens on delivery. */
+  COD_ORDER_PLACED: 'COD_ORDER_PLACED'
 });
 
 /**

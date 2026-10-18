@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS merchants (
     contact_phone TEXT NOT NULL,
     webhook_url TEXT,
     webhook_secret TEXT NOT NULL,
+    api_key TEXT,
     branding TEXT NOT NULL DEFAULT '{"primaryColor":"#2563eb","appName":"YOUPI PG","logoUrl":null}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -90,6 +91,10 @@ CREATE TABLE IF NOT EXISTS payment_sessions (
     verification_level INTEGER DEFAULT 0,
     verification_sources TEXT DEFAULT '[]',
     verification_tag TEXT DEFAULT 'UNVERIFIED',
+    confirmation_status TEXT NOT NULL DEFAULT 'UNCONFIRMED',
+    confirmed_at TEXT,
+    confirmed_by TEXT,
+    confirmation_note TEXT,
     metadata TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -97,6 +102,42 @@ CREATE TABLE IF NOT EXISTS payment_sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_payment_sessions_active ON payment_sessions (receiving_account_id, status);
+
+-- 5b. Canonical Bank Transaction Ledger (P1-02): one row per observed bank credit
+-- reference per receiving account, uniquely reserved once by one order.
+CREATE TABLE IF NOT EXISTS bank_transaction_ledger (
+    id TEXT PRIMARY KEY,
+    receiving_account_id TEXT NOT NULL REFERENCES payment_receiving_accounts(id) ON DELETE CASCADE,
+    merchant_id TEXT NOT NULL REFERENCES merchants(id) ON DELETE CASCADE,
+    bank_reference TEXT,
+    amount_paise INTEGER NOT NULL,
+    observed_at TEXT,
+    first_observation_id TEXT,
+    first_source TEXT,
+    consumed_by_session_id TEXT REFERENCES payment_sessions(id) ON DELETE SET NULL,
+    provenance TEXT NOT NULL DEFAULT 'OBSERVED',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_txn_unique_ref
+    ON bank_transaction_ledger (receiving_account_id, bank_reference)
+    WHERE bank_reference IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_bank_txn_consumer ON bank_transaction_ledger (consumed_by_session_id);
+
+-- 7b. Durable Webhook Outbox: rows are written in the SAME transaction as the
+-- payment state transition, then flushed to webhook_deliveries (at-least-once).
+CREATE TABLE IF NOT EXISTS payment_events_outbox (
+    id TEXT PRIMARY KEY,
+    payment_id TEXT NOT NULL REFERENCES payment_sessions(id) ON DELETE CASCADE,
+    event TEXT NOT NULL,
+    flushed INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_pending_event
+    ON payment_events_outbox (payment_id, event) WHERE flushed = 0;
+CREATE INDEX IF NOT EXISTS idx_outbox_pending ON payment_events_outbox (flushed, created_at);
 
 -- 5. Payment Observations Table
 CREATE TABLE IF NOT EXISTS payment_observations (

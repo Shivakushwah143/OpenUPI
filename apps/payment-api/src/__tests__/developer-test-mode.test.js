@@ -147,9 +147,11 @@ describe('Section 12: Developer Test Mode Acceptance Tests (All 29 Points)', () 
     assert.equal(res.body.stages.stage5.status, 'PASSED');
     assert.equal(res.body.stages.stage6.status, 'ATTRIBUTED');
 
-    // Confirm state machine moved session
+    // A single injected SMS is a REPORTED claim: it never moves the payment to a
+    // final state on its own (independent bank-credit verification is required).
     const updated = sessionRepo.findById(s1.id);
-    assert.ok([PaymentStatus.SUCCESS, PaymentStatus.PROCESSING].includes(updated.status));
+    assert.notEqual(updated.status, PaymentStatus.SUCCESS);
+    assert.equal(updated.confirmationStatus, 'REPORTED');
   });
 
   // ---------------------------------------------------------------------------

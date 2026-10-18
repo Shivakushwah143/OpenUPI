@@ -76,7 +76,7 @@ describe('Google Messages / SMS Payment Observer Integration Tests', () => {
       assert.equal(json.service, 'sms-observer');
     });
 
-    test('End-to-End: processing bank SMS confirms active payment session in Payment API', async () => {
+    test('End-to-End: processing bank SMS records REPORTED evidence on the active payment session (never finalizes alone)', async () => {
       // 1. Create a payment in Payment API for ₹499
       const session = apiInstance.app.context.sessionRepo.create({
         merchantId: '00000000-0000-0000-0000-000000000001',
@@ -98,11 +98,14 @@ describe('Google Messages / SMS Payment Observer Integration Tests', () => {
       assert.equal(result.accepted, true);
       assert.equal(result.attribution.attributed, true);
       assert.equal(result.attribution.paymentSessionId, session.id);
-      assert.equal(result.attribution.outcomeStatus, PaymentStatus.SUCCESS);
+      // A single SMS is a claim: it is recorded as evidence but cannot finalize the
+      // payment without independent bank-credit verification (audit P1-01 / Gate B).
+      assert.equal(result.attribution.outcomeStatus, 'REPORTED');
 
-      // 3. Verify session in DB updated to SUCCESS
+      // 3. Verify session in DB stays pending with REPORTED confirmation provenance
       const updated = apiInstance.app.context.sessionRepo.findById(session.id);
-      assert.equal(updated.status, PaymentStatus.SUCCESS);
+      assert.equal(updated.status, PaymentStatus.PROCESSING);
+      assert.equal(updated.confirmationStatus, 'REPORTED');
     });
   });
 });

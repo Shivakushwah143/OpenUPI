@@ -99,7 +99,7 @@ describe('Gmail Payment Observer Integration Tests', () => {
       assert.ok(json.authUrl.includes('gmail.readonly'));
     });
 
-    test('End-to-End: processing bank email confirms active payment session in Payment API', async () => {
+    test('End-to-End: processing bank email records REPORTED evidence on the active payment session (never finalizes alone)', async () => {
       // 1. Create a payment in Payment API
       const session = apiInstance.app.context.sessionRepo.create({
         merchantId: '00000000-0000-0000-0000-000000000001',
@@ -123,9 +123,12 @@ describe('Gmail Payment Observer Integration Tests', () => {
       assert.equal(result.attribution.attributed, true);
       assert.equal(result.attribution.paymentSessionId, session.id);
 
-      // Verify session updated to SUCCESS in DB
+      // The single email is a REPORTED claim: it can no longer finalize the payment.
+      // Independent bank-credit verification (a second channel reporting the same
+      // bank reference) is required before SUCCESS.
       const updated = apiInstance.app.context.sessionRepo.findById(session.id);
-      assert.equal(updated.status, PaymentStatus.SUCCESS);
+      assert.equal(updated.status, PaymentStatus.PROCESSING);
+      assert.equal(updated.confirmationStatus, 'REPORTED');
     });
   });
 });

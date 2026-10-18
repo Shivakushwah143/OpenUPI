@@ -11,7 +11,8 @@ import {
   PaymentStatus,
   PublicPaymentOutcome,
   ObserverSource,
-  ObservationAttributionStatus
+  ObservationAttributionStatus,
+  ConfirmationStatus
 } from '@youpi/common';
 import {
   Database,
@@ -142,7 +143,7 @@ describe('@youpi/core Unit & Integration Tests', () => {
       db.close();
     });
 
-    test('attributes matching observation to active processing session', () => {
+    test('a single observation is recorded as REPORTED evidence and never marks the payment SUCCESS', () => {
       // 1. Create and activate session for ₹200
       const session = sessionRepo.create({
         merchantId: defaultMerchant.id,
@@ -165,16 +166,19 @@ describe('@youpi/core Unit & Integration Tests', () => {
 
       const result = attributionEngine.processObservation(normObs);
       assert.equal(result.attributed, true);
-      assert.equal(result.outcomeStatus, PaymentStatus.SUCCESS);
+      assert.equal(result.outcomeStatus, 'REPORTED');
+      assert.equal(result.confirmationStatus, ConfirmationStatus.REPORTED);
       assert.equal(result.paymentSessionId, session.id);
 
-      // Verify session updated to SUCCESS in DB
+      // The claim is recorded as evidence, but the payment is NOT successful and
+      // NOT completed: one observer statement is never bank credit proof (Gate B).
       const updatedSession = sessionRepo.findById(session.id);
-      assert.equal(updatedSession.status, PaymentStatus.SUCCESS);
-      assert.ok(updatedSession.completedAt);
+      assert.equal(updatedSession.status, PaymentStatus.PROCESSING);
+      assert.equal(updatedSession.confirmationStatus, ConfirmationStatus.REPORTED);
+      assert.equal(updatedSession.completedAt, null);
 
-      // Verify event was emitted
-      assert.ok(emittedEvents.some(e => e.event === 'PAYMENT.SUCCESS'));
+      assert.ok(emittedEvents.some(e => e.event === 'PAYMENT.REPORTED'));
+      assert.equal(emittedEvents.some(e => e.event === 'PAYMENT.SUCCESS'), false);
     });
 
     test('deduplicates multi-channel observations (SMS + Gmail)', () => {
@@ -197,10 +201,12 @@ describe('@youpi/core Unit & Integration Tests', () => {
       });
       const res1 = attributionEngine.processObservation(obsSms);
       assert.equal(res1.attributed, true);
-      assert.equal(res1.outcomeStatus, PaymentStatus.SUCCESS);
+      assert.equal(res1.outcomeStatus, 'REPORTED');
       assert.equal(res1.verificationLevel, 1);
+      assert.equal(sessionRepo.findById(session.id).status, PaymentStatus.PROCESSING);
 
-      // Method 2: Gmail observes same payment from independent channel -> Upgrades to Level 2 (L2 Dual Verification)
+      // Method 2: Gmail observes the SAME bank reference (UTR111) from an independent
+      // channel -> independently corroborated bank credit -> BANK_CONFIRMED SUCCESS
       const obsGmail = ObservationNormalizer.normalize({
         source: ObserverSource.GMAIL,
         receivingAccountId: receivingAccount.id,
@@ -210,7 +216,10 @@ describe('@youpi/core Unit & Integration Tests', () => {
       });
       const res2 = attributionEngine.processObservation(obsGmail);
       assert.equal(res2.attributed, true);
+      assert.equal(res2.outcomeStatus, PaymentStatus.SUCCESS);
+      assert.equal(res2.confirmationStatus, ConfirmationStatus.BANK_CONFIRMED);
       assert.equal(res2.verificationLevel, 2);
+      assert.equal(sessionRepo.findById(session.id).status, PaymentStatus.SUCCESS);
 
       // Duplicate test: SMS submits same UTR111 again -> MUST be rejected as DUPLICATE_IGNORED!
       const resSmsDup = attributionEngine.processObservation(obsSms);

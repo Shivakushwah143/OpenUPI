@@ -17,8 +17,8 @@ export class MerchantRepository {
     const now = new Date().toISOString();
 
     const sql = `
-      INSERT INTO merchants (id, business_name, slug, contact_email, contact_phone, webhook_url, webhook_secret, branding, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO merchants (id, business_name, slug, contact_email, contact_phone, webhook_url, webhook_secret, api_key, branding, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     this.db.execute(sql, [
@@ -29,6 +29,7 @@ export class MerchantRepository {
       data.contactPhone,
       data.webhookUrl || null,
       data.webhookSecret || crypto.randomBytes(32).toString('hex'),
+      data.apiKey || null,
       branding,
       now,
       now
@@ -88,6 +89,10 @@ export class MerchantRepository {
       fields.push('webhook_secret = ?');
       params.push(updates.webhookSecret);
     }
+    if (updates.apiKey !== undefined) {
+      fields.push('api_key = ?');
+      params.push(updates.apiKey);
+    }
     if (updates.branding !== undefined) {
       fields.push('branding = ?');
       params.push(typeof updates.branding === 'object' ? JSON.stringify(updates.branding) : updates.branding);
@@ -113,6 +118,7 @@ export class MerchantRepository {
       contactPhone: row.contact_phone,
       webhookUrl: row.webhook_url,
       webhookSecret: row.webhook_secret,
+      apiKey: row.api_key || null,
       branding: JSON.parse(row.branding || '{}'),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at)

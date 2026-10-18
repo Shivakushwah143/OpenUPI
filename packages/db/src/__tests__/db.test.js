@@ -141,8 +141,8 @@ describe('@youpi/db Unit & Integration Tests', () => {
       assert.equal(acctDuringProc.isSlotBusy, true);
       assert.equal(acctDuringProc.currentActiveSessionId, sessionA.id);
 
-      // 5. Session A finishes with SUCCESS
-      const successA = sessionRepo.transitionToTerminal(sessionA.id, PaymentStatus.SUCCESS);
+      // 5. Session A finishes with SUCCESS (only reachable through the confirmation path)
+      const successA = sessionRepo.confirmPaymentSuccess(sessionA.id).session;
       assert.equal(successA.status, PaymentStatus.SUCCESS);
       assert.ok(successA.completedAt instanceof Date);
 
