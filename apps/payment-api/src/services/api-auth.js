@@ -1,9 +1,12 @@
 import crypto from 'node:crypto';
 import { HttpServer } from '../server.js';
+import { ObserverCredentialRepository } from '@youpi/db';
 import {
   constantTimeEquals,
   verifyObserverSignature,
   maskSecret,
+  hashSecret,
+  openSecret,
   OBSERVER_AUTH_HEADERS
 } from '@youpi/common';
 
@@ -25,7 +28,8 @@ import {
 
 export const ADMIN_ROLE = 'ADMIN';
 export const MERCHANT_ROLE = 'MERCHANT';
-export const LOCAL_ROLE = 'LOCAL_UNVERIFIED';
+export const OBSERVER_ROLE = 'OBSERVER';
+export const CHECKOUT_ROLE = 'CHECKOUT';
 
 /** Admin paths a merchant-role credential may use (own tenant scope only). */
 export const MERCHANT_ALLOWED_ADMIN_PATHS = Object.freeze([
@@ -90,18 +94,16 @@ export function identifyPrincipal(req, ctx = {}) {
  * @param {{ ctx?: any, requireRole?: string, allowMerchant?: boolean, allowLocalUnverified?: boolean }} options
  */
 export function requireAdmin(req, res, options = {}) {
-  const adminKeyConfigured = Boolean(resolveAdminApiKey());
   const principal = identifyPrincipal(req, options.ctx || {});
 
+  // Fail closed: there is NO unauthenticated development fallback. When no
+  // credential is configured the endpoint is simply unreachable (audit item 3).
   if (!principal) {
-    if (adminKeyConfigured || options.allowLocalUnverified === false || isProduction()) {
-      HttpServer.json(res, 401, {
-        error: 'UNAUTHORIZED',
-        message: 'Administrative credentials required. Provide X-Admin-Key (or Authorization: Bearer).'
-      });
-      return null;
-    }
-    return { role: LOCAL_ROLE, actorId: 'local_unverified' };
+    HttpServer.json(res, 401, {
+      error: 'UNAUTHORIZED',
+      message: 'Administrative credentials required. Provide X-Admin-Key (or Authorization: Bearer).'
+    });
+    return null;
   }
 
   if (principal.role === MERCHANT_ROLE && options.allowMerchant !== true) {
@@ -150,12 +152,107 @@ export function resolveAuthenticatedMerchant(req, ctx = {}) {
  * Looks up the merchant that owns the presented observer credential.
  * @returns {{ ok: boolean, merchant?: any, code?: string }}
  */
+export function observerCredentialRepo(ctx = {}) {
+  if (ctx.observerCredentialRepo) return ctx.observerCredentialRepo;
+  if (!ctx.db) return null;
+  return new ObserverCredentialRepository(ctx.db);
+}
+
+/**
+ * Resolves the DEDICATED observer credential presented in X-Observer-Key. Merchant
+ * and admin API keys are never accepted here (observer hardening sprint item 1).
+ * @returns {{ ok: boolean, merchant?: any, credential?: any, secret?: string, code?: string }}
+ */
 export function resolveObserverCredential(req, ctx = {}) {
-  const key = extractCredential(req, 'x-observer-key');
-  if (!key) return { ok: false, code: 'MISSING_CREDENTIAL' };
-  const merchant = findMerchantByApiKey(ctx, key);
+  const keyId = extractCredential(req, 'x-observer-key');
+  if (!keyId) return { ok: false, code: 'MISSING_CREDENTIAL' };
+
+  const repo = observerCredentialRepo(ctx);
+  if (!repo) return { ok: false, code: 'CREDENTIAL_STORE_UNAVAILABLE' };
+
+  const resolved = repo.resolveSecret(keyId);
+  if (!resolved) return { ok: false, code: 'UNKNOWN_OR_REVOKED_CREDENTIAL' };
+
+  const merchant = ctx.merchantRepo?.findById(resolved.credential.merchantId);
   if (!merchant) return { ok: false, code: 'UNKNOWN_CREDENTIAL' };
-  return { ok: true, merchant };
+
+  return { ok: true, merchant, credential: resolved.credential, secret: resolved.secret };
+}
+
+/**
+ * Resolves the HMAC secret bound to a paired Android/SMS device. Device keys are
+ * sealed at rest and opened here only (the request guard never sees plaintext DB
+ * values).
+ * @returns {{ ok: boolean, secret?: string, code?: string }}
+ */
+export function resolveDeviceSecret(device) {
+  if (!device || !device.signing_key_hash) return { ok: false, code: 'DEVICE_HAS_NO_KEY' };
+  try {
+    return { ok: true, secret: openSecret(device.signing_key_hash) };
+  } catch {
+    return { ok: false, code: 'DEVICE_KEY_UNREADABLE' };
+  }
+}
+
+/**
+ * Enforces TLS for authenticated surfaces in production. Behind a reverse proxy the
+ * forwarded protocol is honoured; `YOUPI_ALLOW_INSECURE_HTTP=true` is the only,
+ * explicit opt-out and is ignored in production.
+ */
+export function enforceSecureTransport(req, res) {
+  if (!isProduction()) return true;
+  if (req.socket && req.socket.encrypted) return true;
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  if (forwarded === 'https') return true;
+  HttpServer.json(res, 400, {
+    error: 'TLS_REQUIRED',
+    message: 'HTTPS is required for authenticated payment and observer endpoints in production.'
+  });
+  return false;
+}
+
+/**
+ * Guards payment-status polling with a scoped, expiring checkout credential
+ * (observer/reliability sprint item 4). A merchant/admin credential also grants
+ * access; otherwise the caller must present the checkout token issued for THIS
+ * session (header X-Checkout-Token or ?t= query parameter).
+ * @returns {boolean} true when the caller may read the session status
+ */
+export function requireCheckoutAccess(req, res, ctx, session) {
+  const principal = identifyPrincipal(req, ctx || {});
+  if (principal) {
+    if (principal.role === ADMIN_ROLE) return true;
+    if (principal.role === MERCHANT_ROLE && session && principal.merchantId === session.merchantId) return true;
+    HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant payment read refused.' });
+    return false;
+  }
+
+  const token = req.headers['x-checkout-token'] || req.query?.t || req.query?.checkoutToken;
+  if (!token) {
+    HttpServer.json(res, 401, {
+      error: 'UNAUTHORIZED',
+      reason: 'MISSING_CHECKOUT_TOKEN',
+      message: 'A checkout credential is required to read payment status (X-Checkout-Token).'
+    });
+    return false;
+  }
+
+  if (!session || !session.checkoutTokenHash) {
+    HttpServer.json(res, 401, { error: 'UNAUTHORIZED', reason: 'NO_CHECKOUT_TOKEN_ISSUED' });
+    return false;
+  }
+
+  if (session.checkoutTokenExpiresAt && new Date(session.checkoutTokenExpiresAt).getTime() <= Date.now()) {
+    HttpServer.json(res, 401, { error: 'UNAUTHORIZED', reason: 'CHECKOUT_TOKEN_EXPIRED' });
+    return false;
+  }
+
+  if (!constantTimeEquals(hashSecret(String(token)), session.checkoutTokenHash)) {
+    HttpServer.json(res, 401, { error: 'UNAUTHORIZED', reason: 'INVALID_CHECKOUT_TOKEN' });
+    return false;
+  }
+
+  return true;
 }
 
 /**

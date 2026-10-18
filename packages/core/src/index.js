@@ -5,6 +5,7 @@ export * from './queue-engine.js';
 export * from './timing-engine.js';
 export * from './recovery-engine.js';
 export * from './webhook-engine.js';
+export * from './webhook-destination.js';
 export * from './bank-sms-parser.js';
 export * from './bank-email-parser.js';
 export * from './qr.js';

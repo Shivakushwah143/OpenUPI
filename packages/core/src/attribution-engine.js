@@ -203,13 +203,22 @@ export class AttributionEngine {
     const spreadMs = evidence.length > 1
       ? new Date(evidence[evidence.length - 1].ingested_at).getTime() - new Date(evidence[0].ingested_at).getTime()
       : 0;
-    // Two independent channels must reference the SAME bank credit. When a
-    // corroboration window is configured (> 0) their reports must also fall inside
-    // it; 0 means the window is not enforced (isolated test / immediate ingest).
+    // Corroboration is EVIDENCE, not settlement: two observer channels agreeing on
+    // the same credit raises confidence and is recorded, but without an
+    // authenticated bank/acquirer source (BANK_CONFIRMED ledger provenance) the
+    // payment is NOT marked verified and the order is NOT fulfilled automatically.
     const corroborated = sources.length >= 2 && (this.gracePeriodMs <= 0 || spreadMs <= this.gracePeriodMs);
 
-    if (!authoritativeBankProof && !corroborated) {
-      return { confirmed: false, reason: 'INSUFFICIENT_INDEPENDENT_EVIDENCE', sources, session };
+    if (!authoritativeBankProof) {
+      return {
+        confirmed: false,
+        reason: corroborated
+          ? 'AWAITING_AUTHORITATIVE_BANK_CONFIRMATION'
+          : 'INSUFFICIENT_INDEPENDENT_EVIDENCE',
+        corroborated,
+        sources,
+        session
+      };
     }
 
     const result = this.sessionRepo.confirmPaymentSuccess(session.id, {
@@ -253,6 +262,84 @@ export class AttributionEngine {
     }
 
     return { confirmed: result.confirmed, alreadyConfirmed: result.alreadyConfirmed, sources, session: result.session || session };
+  }
+
+  /**
+   * Applies an AUTHENTICATED bank/acquirer confirmation (sprint item 7).
+   *
+   * The reference is reserved to exactly ONE matching session on the receiving
+   * account for the exact amount, its ledger provenance is set to BANK_CONFIRMED,
+   * and that session — and only that session — may then reach SUCCESS.
+   *
+   * @param {{
+   *   receivingAccountId: string,
+   *   merchantId: string,
+   *   bankReferenceNumber: string,
+   *   amountPaise: bigint|number,
+   *   source?: string,
+   *   confirmedBy?: string
+   * }} input
+   * @returns {{ ok: boolean, confirmed: boolean, reason?: string, sessionId?: string, ledgerRowId?: string }}
+   */
+  confirmAuthoritativeBankCredit(input) {
+    const reference = String(input?.bankReferenceNumber || '').trim();
+    const amount = input?.amountPaise !== undefined && input?.amountPaise !== null ? Number(input.amountPaise) : null;
+    if (!input?.receivingAccountId || !reference || amount === null || Number.isNaN(amount)) {
+      return { ok: false, confirmed: false, reason: 'MISSING_FIELDS' };
+    }
+
+    const bankTxn = this.sessionRepo.bankTxn;
+    const existing = bankTxn.findByReference(input.receivingAccountId, reference);
+    if (existing) {
+      if (Number(existing.amount_paise) !== amount) {
+        return { ok: false, confirmed: false, reason: 'AMOUNT_MISMATCH', ledgerRowId: existing.id };
+      }
+      if (existing.merchant_id !== input.merchantId) {
+        return { ok: false, confirmed: false, reason: 'CROSS_TENANT_REFERENCE', ledgerRowId: existing.id };
+      }
+      if (existing.provenance !== 'BANK_CONFIRMED') {
+        this.sessionRepo.db.execute(
+          "UPDATE bank_transaction_ledger SET provenance = 'BANK_CONFIRMED' WHERE id = ?",
+          [existing.id]
+        );
+      }
+    }
+
+    const candidates = this.sessionRepo.db.query(`
+      SELECT id FROM payment_sessions
+      WHERE receiving_account_id = ? AND amount_paise = ? AND status IN (?, ?)
+      ORDER BY created_at ASC
+    `, [input.receivingAccountId, amount, PaymentStatus.ACTIVE, PaymentStatus.PROCESSING]);
+
+    for (const candidate of candidates) {
+      const reservation = bankTxn.reserve({
+        sessionId: candidate.id,
+        receivingAccountId: input.receivingAccountId,
+        merchantId: input.merchantId,
+        bankReference: reference,
+        amountPaise: amount,
+        observedAt: new Date(),
+        source: input.source || 'ACQUIRER',
+        provenance: 'BANK_CONFIRMED'
+      });
+
+      // Already consumed by another order: this credit can never be credited twice.
+      if (!reservation.reserved) continue;
+
+      const verification = this._verifyBankCredit(candidate.id, { bankReferenceNumber: reference });
+      if (verification.confirmed) {
+        return { ok: true, confirmed: true, sessionId: candidate.id, ledgerRowId: reservation.rowId || existing?.id };
+      }
+      return {
+        ok: true,
+        confirmed: false,
+        reason: verification.reason,
+        sessionId: candidate.id,
+        ledgerRowId: reservation.rowId || existing?.id
+      };
+    }
+
+    return { ok: true, confirmed: false, reason: 'NO_MATCHING_SESSION' };
   }
 
   /**

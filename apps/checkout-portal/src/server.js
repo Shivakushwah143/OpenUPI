@@ -45,11 +45,15 @@ export class CheckoutServer {
     this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
   }
 
-  async fetchPaymentState(paymentId) {
+  async fetchPaymentState(paymentId, checkoutToken = '') {
     try {
       const internalPort = process.env.PAYMENT_API_PORT || 6100;
+      // Payment-status polling is credential-scoped: forward the checkout token the
+      // browser received in the checkout URL (?t=) so the API can authorize the read.
+      const headers = { 'X-Internal-Render': 'true' };
+      if (checkoutToken) headers['X-Checkout-Token'] = checkoutToken;
       const res = await fetch(`http://127.0.0.1:${internalPort}/api/v1/checkout/${paymentId}/state`, {
-        headers: { 'X-Internal-Render': 'true' }
+        headers
       });
       if (!res.ok) return null;
       return await res.json();
@@ -218,7 +222,7 @@ export class CheckoutServer {
       const qrMatch = pathname.match(/^\/checkout\/([^/]+)\/qr\.svg$/);
       if (qrMatch) {
         const paymentId = qrMatch[1];
-        const state = await this.fetchPaymentState(paymentId);
+        const state = await this.fetchPaymentState(paymentId, url.searchParams.get('t') || '');
         const upiUri = state?.upiUri || `upi://pay?pa=${encodeURIComponent(state?.payeeVpa || 'merchant@upi')}&pn=${encodeURIComponent(state?.merchantName || 'Store')}&am=${encodeURIComponent(state?.amount || '100.00')}&tn=${encodeURIComponent(paymentId)}`;
 
         const svg = generateQrSvg(upiUri, 220);
@@ -237,7 +241,7 @@ export class CheckoutServer {
       const checkoutMatch = pathname.match(/^\/checkout\/([^/]+)$/);
       if (checkoutMatch) {
         const paymentId = checkoutMatch[1];
-        const state = await this.fetchPaymentState(paymentId);
+        const state = await this.fetchPaymentState(paymentId, url.searchParams.get('t') || '');
 
         const rendered = this.renderHtml(paymentId, state);
         res.writeHead(200, {

@@ -9,4 +9,5 @@ export * from './repositories/observation.repository.js';
 export * from './repositories/support-ticket.repository.js';
 export * from './repositories/audit-log.repository.js';
 export * from './repositories/device.repository.js';
+export * from './repositories/observer-credential.repository.js';
 

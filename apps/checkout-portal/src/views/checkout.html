@@ -4139,6 +4139,15 @@
   <script>
     const PAYMENT_ID = "{{PAYMENT_ID}}";
     const API_BASE = "{{API_BASE_URL}}";
+    // Scoped, expiring checkout credential delivered in the checkout URL (?t=).
+    // Payment-status polling and the status stream require it.
+    const CHECKOUT_TOKEN = (() => {
+      try { return new URLSearchParams(window.location.search).get('t') || ''; } catch { return ''; }
+    })();
+    const withCheckoutToken = (url) => {
+      if (!CHECKOUT_TOKEN) return url;
+      return `${url}${url.includes('?') ? '&' : '?'}t=${encodeURIComponent(CHECKOUT_TOKEN)}`;
+    };
 
     let state = null;
     let countdownTimer = null;
@@ -5504,7 +5513,7 @@
         await DeviceIdentity.getOrRegister();
         const headers = getApiHeaders();
 
-        const res = await fetch(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/state`, { headers });
+        const res = await fetch(withCheckoutToken(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/state`), { headers });
         const data = await res.json().catch(() => ({}));
 
         if (res.status === 409 || data.error === 'DUPLICATE_SESSION_DETECTED') {
@@ -6674,7 +6683,7 @@
 
       try {
         const devQuery = DeviceIdentity.currentDeviceId ? `?deviceId=${encodeURIComponent(DeviceIdentity.currentDeviceId)}` : '';
-        const streamUrl = `${API_BASE}/api/v1/checkout/${PAYMENT_ID}/stream${devQuery}`;
+        const streamUrl = withCheckoutToken(`${API_BASE}/api/v1/checkout/${PAYMENT_ID}/stream${devQuery}`);
         sse = new EventSource(streamUrl);
 
         const handleRealtimePayload = (event) => {

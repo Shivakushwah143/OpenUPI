@@ -29,7 +29,8 @@ import {
   ObservationRepository,
   SupportTicketRepository,
   AuditLogRepository,
-  DeviceRepository
+  DeviceRepository,
+  ObserverCredentialRepository
 } from '@youpi/db';
 import {
   QueueEngine,
@@ -52,11 +53,14 @@ import {
   verifySignedRequest,
   verifySignedDeviceRequest,
   resolveObserverCredential,
+  resolveDeviceSecret,
+  enforceSecureTransport,
   identifyPrincipal,
   resolveAdminApiKey,
   isProduction,
   MERCHANT_ALLOWED_ADMIN_PATHS,
-  MERCHANT_ROLE
+  MERCHANT_ROLE,
+  OBSERVER_ROLE
 } from './services/api-auth.js';
 
 export function createPaymentApp(customDb = null, options = {}) {
@@ -80,6 +84,7 @@ export function createPaymentApp(customDb = null, options = {}) {
   const ticketRepo = new SupportTicketRepository(db);
   const auditRepo = new AuditLogRepository(db);
   const deviceRepo = new DeviceRepository(db);
+  const observerCredentialRepo = new ObserverCredentialRepository(db);
 
   const eventEmitter = new EventEmitter();
 
@@ -347,6 +352,27 @@ export function createPaymentApp(customDb = null, options = {}) {
 
   if (queueSyncDaemon.unref) queueSyncDaemon.unref();
 
+  // Durable webhook delivery worker (audit P1-06): flushes the transactional
+  // outbox and retries failed deliveries with backoff. Runs in-process so a
+  // crash/restart cannot lose a notification; `processOnce()` is idempotent.
+  const webhookWorkerIntervalMs = Number(process.env.WEBHOOK_WORKER_INTERVAL_MS || 5000);
+  let webhookWorkerBusy = false;
+  const webhookWorkerDaemon = setInterval(async () => {
+    if (webhookWorkerBusy) return;
+    webhookWorkerBusy = true;
+    try {
+      await webhookEngine.processOnce();
+    } catch (err) {
+      console.error('[WebhookWorker]', err.message);
+    } finally {
+      webhookWorkerBusy = false;
+    }
+  }, webhookWorkerIntervalMs);
+  if (webhookWorkerDaemon.unref) webhookWorkerDaemon.unref();
+
+  // Boot catch-up: deliver anything the previous process had not flushed.
+  webhookEngine.processOnce().catch(() => {});
+
   // Continuous 1-Second Aggressive Polling Daemon across SMS Gateway & Gmail Observers
   const aggressivePollerDaemon = setInterval(async () => {
     try {
@@ -429,6 +455,7 @@ export function createPaymentApp(customDb = null, options = {}) {
     customerSessionRepo,
     sessionRepo,
     deviceRepo,
+    observerCredentialRepo,
     obsRepo,
     ticketRepo,
     auditRepo,
@@ -466,8 +493,19 @@ export function createPaymentApp(customDb = null, options = {}) {
       'Refusing to start: ADMIN_API_KEY is not configured. Administrative APIs are never exposed unsigned in production.'
     );
   }
+  if (isProduction() && !String(process.env.YOUPI_SECRET_KEY || process.env.OPENUPI_SECRET_KEY || '').trim()) {
+    throw new Error(
+      'Refusing to start: YOUPI_SECRET_KEY is not configured. Observer/device secrets cannot be protected at rest without it.'
+    );
+  }
 
   server.setRequestGuard(async (req, res, pathname, method) => {
+    // Authenticated surfaces are TLS-only in production (observer hardening item 1).
+    const authenticatedSurface = pathname.startsWith('/api/v1/admin/')
+      || OBSERVER_SIGNED_PATHS.has(pathname)
+      || DEVICE_SIGNED_PATHS.has(pathname);
+    if (authenticatedSurface && !enforceSecureTransport(req, res)) return false;
+
     const needsRawBody = OBSERVER_SIGNED_PATHS.has(pathname) || DEVICE_SIGNED_PATHS.has(pathname);
     if (needsRawBody) {
       req.rawBody = await new Promise(resolve => {
@@ -519,14 +557,17 @@ export function createPaymentApp(customDb = null, options = {}) {
         req,
         res,
         ctx: context,
-        secret: credential.merchant.apiKey,
-        scope: `observer:${credential.merchant.id}`,
+        secret: credential.secret,
+        scope: `observer:${credential.credential.id}`,
         rawBody: req.rawBody || ''
       });
       if (!verified) return false;
+      if (context.observerCredentialRepo) context.observerCredentialRepo.touch(credential.credential.id);
       req.auth = {
-        role: 'OBSERVER',
-        actorId: `observer:${credential.merchant.id}`,
+        role: OBSERVER_ROLE,
+        actorId: `observer:${credential.credential.id}`,
+        credentialId: credential.credential.id,
+        keyId: credential.credential.keyId,
         merchantId: credential.merchant.id,
         merchant: credential.merchant
       };
@@ -550,11 +591,16 @@ export function createPaymentApp(customDb = null, options = {}) {
         HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Device not authorized or inactive.' });
         return false;
       }
+      const deviceSecret = resolveDeviceSecret(device);
+      if (!deviceSecret.ok) {
+        HttpServer.json(res, 403, { error: 'FORBIDDEN', reason: deviceSecret.code, message: 'Device signing key is unavailable.' });
+        return false;
+      }
       const verified = verifySignedDeviceRequest({
         req,
         res,
         ctx: context,
-        secret: device.signing_key_hash,
+        secret: deviceSecret.secret,
         scope: `device:${deviceId}`,
         rawBody: req.rawBody || ''
       });
@@ -566,16 +612,15 @@ export function createPaymentApp(customDb = null, options = {}) {
     // --- Merchant payment creation: credential-scoped tenant (P0-07) ---
     if (pathname === '/api/v1/payments' && method === 'POST') {
       const principal = identifyPrincipal(req, context);
+      // Fail closed everywhere: payment creation always requires a credential.
       if (!principal) {
-        if (isProduction()) {
-          HttpServer.json(res, 401, {
-            error: 'UNAUTHORIZED',
-            message: 'Merchant API key required to create payments in production (X-API-Key).'
-          });
-          return false;
-        }
-        return true;
+        HttpServer.json(res, 401, {
+          error: 'UNAUTHORIZED',
+          message: 'A merchant (X-API-Key) or operator (X-Admin-Key) credential is required to create payments.'
+        });
+        return false;
       }
+      if (!enforceSecureTransport(req, res)) return false;
       if (principal.role === MERCHANT_ROLE) {
         const claimed = req.headers['x-merchant-id'];
         if (claimed && claimed !== principal.merchantId) {
@@ -600,6 +645,7 @@ export function createPaymentApp(customDb = null, options = {}) {
   function destroy() {
     clearInterval(queueSyncDaemon);
     clearInterval(aggressivePollerDaemon);
+    clearInterval(webhookWorkerDaemon);
     for (const timer of activeSweepTimers) {
       clearInterval(timer);
     }

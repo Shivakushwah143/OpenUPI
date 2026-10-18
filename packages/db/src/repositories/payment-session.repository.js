@@ -5,7 +5,9 @@ import {
   ConfirmationStatus,
   isTerminalStatus,
   allowedSourceStatuses,
-  assertValidTransition
+  assertValidTransition,
+  hashSecret,
+  generateOpaqueToken
 } from '@youpi/common';
 import { BankTransactionRepository } from './bank-transaction.repository.js';
 
@@ -41,13 +43,21 @@ export class PaymentSessionRepository {
     const now = new Date().toISOString();
     const metadata = typeof data.metadata === 'object' ? JSON.stringify(data.metadata) : (data.metadata || '{}');
 
+    // Scoped, expiring checkout credential for payment-status polling. Only the
+    // sha256 of the token is stored; the plaintext is returned to the caller once.
+    const checkoutToken = data.checkoutTokenTtlMs === 0 ? null : generateOpaqueToken(32);
+    const checkoutTokenHash = checkoutToken ? hashSecret(checkoutToken) : null;
+    const checkoutTokenExpiresAt = checkoutToken
+      ? new Date(Date.now() + (data.checkoutTokenTtlMs || 60 * 60 * 1000)).toISOString()
+      : null;
+
     const sql = `
       INSERT INTO payment_sessions (
         id, merchant_id, customer_id, receiving_account_id, order_id,
         amount_paise, currency, method, status, queue_position,
         return_url, idempotency_key, device_id, verification_level, verification_sources,
-        verification_tag, metadata, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', 'UNVERIFIED', ?, ?, ?)
+        verification_tag, checkout_token_hash, checkout_token_expires_at, metadata, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '[]', 'UNVERIFIED', ?, ?, ?, ?, ?)
     `;
 
     this.db.execute(sql, [
@@ -64,12 +74,32 @@ export class PaymentSessionRepository {
       data.returnUrl || null,
       data.idempotencyKey || null,
       data.deviceId || null,
+      checkoutTokenHash,
+      checkoutTokenExpiresAt,
       metadata,
       now,
       now
     ]);
 
-    return this.findById(id);
+    const session = this.findById(id);
+    if (session) session.checkoutToken = checkoutToken;
+    return session;
+  }
+
+  /**
+   * Issues (or re-issues) the checkout credential for a session.
+   * @param {string} sessionId
+   * @param {number} ttlMs
+   * @returns {string|null} the plaintext token (returned once)
+   */
+  issueCheckoutToken(sessionId, ttlMs = 60 * 60 * 1000) {
+    const token = generateOpaqueToken(32);
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    const res = this.db.execute(
+      'UPDATE payment_sessions SET checkout_token_hash = ?, checkout_token_expires_at = ? WHERE id = ?',
+      [hashSecret(token), expiresAt, sessionId]
+    );
+    return res.changes === 1 ? token : null;
   }
 
   findById(id) {
@@ -811,6 +841,8 @@ export class PaymentSessionRepository {
       confirmedAt: row.confirmed_at ? new Date(row.confirmed_at) : null,
       confirmedBy: row.confirmed_by || null,
       confirmationNote: row.confirmation_note || null,
+      checkoutTokenHash: row.checkout_token_hash || null,
+      checkoutTokenExpiresAt: row.checkout_token_expires_at ? new Date(row.checkout_token_expires_at) : null,
       metadata: JSON.parse(row.metadata || '{}'),
       createdAt: new Date(row.created_at),
       updatedAt: new Date(row.updated_at)

@@ -6,6 +6,18 @@ import { globalTunnelManager } from '../services/tunnel-manager.js';
 import { scrubSecretsFromLogLine } from '../services/api-auth.js';
 import { formatQrDataUrl } from '../services/whatsapp-berry.service.js';
 
+/**
+ * SSRF guard for merchant-configured webhook destinations (audit P1-05): the URL is
+ * validated when it is configured AND re-validated on every delivery attempt.
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+async function validateWebhookUrlForStorage(rawUrl, webhookEngine) {
+  if (rawUrl === undefined || rawUrl === null || String(rawUrl).trim() === '') return { ok: true };
+  const engine = webhookEngine || { validateDestination: async url => (await import('@youpi/core')).validateWebhookDestination(url) };
+  const result = await engine.validateDestination(String(rawUrl).trim());
+  return result.ok ? { ok: true } : { ok: false, reason: result.reason };
+}
+
 function resolveSellingModeAndMethods(body, currentBranding = {}) {
   const inputBranding = body.branding || {};
   let sellingMode = body.sellingMode || inputBranding.sellingMode || currentBranding.sellingMode;
@@ -788,6 +800,15 @@ export function registerAdminRoutes(server, ctx) {
       updates.businessName = body.businessName.trim();
     }
     if (body.webhookUrl !== undefined) {
+      const webhookCheck = await validateWebhookUrlForStorage(body.webhookUrl, ctx.webhookEngine);
+      if (!webhookCheck.ok) {
+        HttpServer.json(res, 400, {
+          error: 'INVALID_WEBHOOK_DESTINATION',
+          reason: webhookCheck.reason,
+          message: 'Webhook URL must be a public HTTPS endpoint (no loopback, private, link-local or metadata targets).'
+        });
+        return;
+      }
       updates.webhookUrl = body.webhookUrl?.trim() || null;
     }
     if (body.webhookSecret !== undefined && body.webhookSecret.trim()) {
@@ -985,8 +1006,19 @@ export function registerAdminRoutes(server, ctx) {
     const updates = {};
     if (body.businessName && body.businessName.trim()) updates.businessName = body.businessName.trim();
     else if (inputBranding.businessName && inputBranding.businessName.trim()) updates.businessName = inputBranding.businessName.trim();
-    if (body.webhookUrl !== undefined) updates.webhookUrl = body.webhookUrl?.trim() || null;
-    else if (inputBranding.webhookUrl !== undefined) updates.webhookUrl = inputBranding.webhookUrl?.trim() || null;
+    if (body.webhookUrl !== undefined || inputBranding.webhookUrl !== undefined) {
+      const candidateUrl = body.webhookUrl !== undefined ? body.webhookUrl : inputBranding.webhookUrl;
+      const webhookCheck = await validateWebhookUrlForStorage(candidateUrl, ctx.webhookEngine);
+      if (!webhookCheck.ok) {
+        HttpServer.json(res, 400, {
+          error: 'INVALID_WEBHOOK_DESTINATION',
+          reason: webhookCheck.reason,
+          message: 'Webhook URL must be a public HTTPS endpoint (no loopback, private, link-local or metadata targets).'
+        });
+        return;
+      }
+      updates.webhookUrl = candidateUrl?.trim() || null;
+    }
     if (body.webhookSecret !== undefined && body.webhookSecret.trim()) updates.webhookSecret = body.webhookSecret.trim();
 
     if (

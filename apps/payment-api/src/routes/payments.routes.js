@@ -1,6 +1,7 @@
 import { HttpServer } from '../server.js';
 import { toPaise, toRupeesString, resolveRuntimeUrls, PaymentStatus } from '@youpi/common';
 import { isTerminalStatus, toPublicOutcome } from '@youpi/core';
+import { requireCheckoutAccess } from '../services/api-auth.js';
 
 /**
  * Registers merchant-facing payment routes.
@@ -262,6 +263,13 @@ export function registerPaymentRoutes(server, ctx) {
       });
     }
 
+    // The checkout credential is handed to the merchant backend once and is
+    // required for status polling (scoped to this session, expiring).
+    const checkoutToken = session.checkoutToken || null;
+    const checkoutUrl = checkoutToken
+      ? `${resolveCheckoutBaseUrl(merchant)}/checkout/${session.id}?t=${encodeURIComponent(checkoutToken)}`
+      : `${resolveCheckoutBaseUrl(merchant)}/checkout/${session.id}`;
+
     HttpServer.json(res, 201, {
       paymentId: session.id,
       orderId: session.orderId,
@@ -270,17 +278,23 @@ export function registerPaymentRoutes(server, ctx) {
       currency: session.currency,
       status: queueResult.status,
       queuePosition: queueResult.queuePosition,
-      checkoutUrl: `${resolveCheckoutBaseUrl(merchant)}/checkout/${session.id}`
+      checkoutUrl,
+      checkoutToken,
+      checkoutTokenExpiresAt: session.checkoutTokenExpiresAt ? session.checkoutTokenExpiresAt.toISOString() : null
     });
   });
 
   // GET /api/v1/payments/:id
+  // Status polling requires a credential: the merchant/operator API key, or the
+  // scoped, expiring checkout credential issued for THIS session (sprint item 4).
   server.get('/api/v1/payments/:id', async (req, res, params) => {
     const session = ctx.sessionRepo.findById(params.id);
     if (!session) {
       HttpServer.json(res, 404, { error: `Payment session not found: ${params.id}` });
       return;
     }
+
+    if (!requireCheckoutAccess(req, res, ctx, session)) return;
 
     const publicStatus = isTerminalStatus(session.status)
       ? toPublicOutcome(session.status)
@@ -311,6 +325,8 @@ export function registerPaymentRoutes(server, ctx) {
       HttpServer.json(res, 404, { error: `Payment session not found: ${params.id}` });
       return;
     }
+
+    if (!requireCheckoutAccess(req, res, ctx, session)) return;
 
     let customer = null;
     if (session.customerId && ctx.customerRepo) {

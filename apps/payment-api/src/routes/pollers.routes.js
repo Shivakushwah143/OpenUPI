@@ -6,6 +6,7 @@ import { HttpServer } from '../server.js';
 import { ObservationNormalizer, BankSmsParser, BankEmailParser, generateQrSvg } from '@youpi/core';
 import { toRupeesString, toPaise, resolveRuntimeUrls, ObserverSource } from '@youpi/common';
 import { issuePairingToken, redeemPairingToken } from '../services/api-auth.js';
+import { sealSecret, hashSecret } from '@youpi/common';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -216,10 +217,12 @@ export function registerPollerRoutes(server, ctx) {
     const nowIso = new Date().toISOString();
 
     try {
+      // The device signing key is sealed at rest; the plaintext is returned to the
+      // device exactly once, during pairing (observer/device secret hardening).
       ctx.db.execute(`
         INSERT INTO android_devices (id, merchant_id, device_name, device_model, signing_key_hash, is_active, last_heartbeat_at, created_at)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-      `, [deviceId, merchantId, deviceName, deviceModel, signingKey, nowIso, nowIso]);
+      `, [deviceId, merchantId, deviceName, deviceModel, sealSecret(signingKey), nowIso, nowIso]);
 
       if (ctx.auditRepo) {
         ctx.auditRepo.log({
@@ -499,7 +502,8 @@ export function registerPollerRoutes(server, ctx) {
       created_at: d.created_at,
       pairedAt: d.created_at,
       // Device signing keys are never returned in any form (audit P0-05/P0-06).
-      signingKeyConfigured: Boolean(d.signing_key_hash)
+      signingKeyConfigured: Boolean(d.signing_key_hash),
+      keyFingerprint: d.signing_key_hash ? hashSecret(d.signing_key_hash).slice(0, 12) : null
     }));
 
     HttpServer.json(res, 200, {

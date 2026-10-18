@@ -1,6 +1,7 @@
 import { HttpServer } from '../server.js';
 import { toRupeesString, buildUpiUri, PaymentStatus, PaymentMethod, ConfirmationStatus, UPI_PROVIDERS } from '@youpi/common';
 import { validateSessionDeviceAccess } from '@youpi/core';
+import { requireCheckoutAccess } from '../services/api-auth.js';
 
 /**
  * Validates device access to an active payment session.
@@ -319,6 +320,10 @@ export function registerCheckoutRoutes(server, ctx) {
       HttpServer.json(res, 404, { error: `Checkout session not found: ${params.id}` });
       return;
     }
+
+    // Status polling is credential-scoped: merchant/operator key or the expiring
+    // checkout credential issued for this session (sprint item 4).
+    if (!requireCheckoutAccess(req, res, ctx, session)) return;
 
     // Server-side Ban & Fraud Enforcement
     const isCustomerBanned = session.customerId && ctx.customerRepo && ctx.customerRepo.isBanned(session.customerId);
@@ -1725,6 +1730,7 @@ export function registerCheckoutRoutes(server, ctx) {
       HttpServer.json(res, 404, { error: 'Session not found' });
       return;
     }
+    if (!requireCheckoutAccess(req, res, ctx, session)) return;
     const deviceAccess = checkSessionDeviceAccess(session, req, null, ctx);
     if (!deviceAccess.allowed) {
       HttpServer.json(res, deviceAccess.statusCode || 409, deviceAccess.body);
