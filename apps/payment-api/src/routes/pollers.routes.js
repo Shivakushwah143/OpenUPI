@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { HttpServer } from '../server.js';
 import { ObservationNormalizer, BankSmsParser, BankEmailParser, generateQrSvg } from '@youpi/core';
 import { toRupeesString, toPaise, resolveRuntimeUrls, ObserverSource } from '@youpi/common';
-import { issuePairingToken, redeemPairingToken } from '../services/api-auth.js';
+import { issuePairingToken, redeemPairingToken, revokeOutstandingPairingTokens } from '../services/api-auth.js';
 import { sealSecret, hashSecret } from '@youpi/common';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -116,6 +116,7 @@ export function registerPollerRoutes(server, ctx) {
     const sender = body.sender || body.from || body.rawPayload?.sender || body.rawPayload?.from;
 
     if (ctx.pipeline && rawText) {
+      if (req.trace) req.trace.mark('pre_pipeline');
       const pipeResult = ctx.pipeline.process({
         source: body.source,
         rawText,
@@ -124,8 +125,10 @@ export function registerPollerRoutes(server, ctx) {
         paymentSessionId: body.paymentSessionId,
         merchantId,
         isTest: Boolean(body.isTest),
-        testModeActive: Boolean(body.testModeActive)
+        testModeActive: Boolean(body.testModeActive),
+        trace: req.trace
       });
+      if (req.trace) req.trace.mark('pipeline_done');
 
       if (pipeResult.status === 'REJECTED' && pipeResult.failingCondition === 'FRAUDULENT_PAYMENT_INJECTION') {
         HttpServer.json(res, 403, {
@@ -220,6 +223,26 @@ export function registerPollerRoutes(server, ctx) {
     }
     const merchantId = redemption.merchantId;
 
+    // Consumption audit: the challenge id (never the token) is recorded so an
+    // operator can correlate an enrollment with the QR that authorised it.
+    if (ctx.auditRepo) {
+      try {
+        ctx.auditRepo.log({
+          merchantId,
+          entityType: 'PAIRING_TOKEN',
+          entityId: redemption.tokenId,
+          action: 'SMS_GATEWAY_PAIRING_TOKEN_REDEEMED',
+          actorType: 'ADMIN',
+          actorId: req.auth?.actorId || null,
+          details: { deviceName, deviceModel }
+        });
+      } catch {
+        // Auditing must not block enrollment, but a missing audit trail is
+        // operationally important: surface it (never the token or its hash).
+        console.error('[Poller] Failed to record pairing-token redemption audit event.');
+      }
+    }
+
     const deviceId = crypto.randomUUID();
     const signingKey = crypto.randomBytes(32).toString('hex');
     const nowIso = new Date().toISOString();
@@ -246,7 +269,7 @@ export function registerPollerRoutes(server, ctx) {
           entityId: deviceId,
           action: 'SMS_GATEWAY_DEVICE_PAIRED',
           actorType: 'ADMIN',
-          details: { deviceName, deviceModel }
+          details: { deviceName, deviceModel, pairingTokenId: redemption.tokenId }
         });
       }
 
@@ -293,6 +316,8 @@ export function registerPollerRoutes(server, ctx) {
       return;
     }
     const deviceId = device.id;
+    const trace = req.trace || null;
+    if (trace) trace.mark('device');
 
     // Resolve the receiving account STRICTLY inside the device's own merchant.
     const merchantAccounts = ctx.db.query(
@@ -350,6 +375,7 @@ export function registerPollerRoutes(server, ctx) {
 
     // Evaluate through Security & Fraud Verification Pipeline for Android Ingest
     if (ctx.pipeline && rawText) {
+      if (trace) trace.mark('pre_pipeline');
       const pipeResult = ctx.pipeline.process({
         source: 'SMS',
         rawText,
@@ -360,8 +386,10 @@ export function registerPollerRoutes(server, ctx) {
         // to bind a body-supplied session belonging to another merchant.
         merchantId: device.merchant_id,
         isTest: Boolean(body.isTest),
-        deviceInfo: device ? `${device.device_name} (${device.device_model})` : 'Android SMS Gateway'
+        deviceInfo: device ? `${device.device_name} (${device.device_model})` : 'Android SMS Gateway',
+        trace
       });
+      if (trace) trace.mark('pipeline_done');
 
       if (pipeResult.status === 'REJECTED' && pipeResult.failingCondition === 'FRAUDULENT_PAYMENT_INJECTION') {
         HttpServer.json(res, 403, {
@@ -545,6 +573,61 @@ export function registerPollerRoutes(server, ctx) {
       serverUrl: baseUrl,
       devices
     });
+  });
+
+  // POST /api/v1/admin/sms-gateway/pairing-tokens/revoke
+  // Invalidates every outstanding enrollment challenge for ONE tenant. Pairing
+  // tokens are already single-use and expire after 10 minutes; this closes the
+  // window immediately when a QR/token may have been exposed. Tenant scope comes
+  // from the credential, never from the body (a merchant cannot revoke another
+  // tenant's challenges).
+  server.post('/api/v1/admin/sms-gateway/pairing-tokens/revoke', async (req, res) => {
+    const credentialMerchantId = req.auth?.role === 'MERCHANT' ? req.auth.merchantId : null;
+
+    let body = {};
+    try {
+      body = await HttpServer.parseBody(req);
+    } catch {
+      HttpServer.json(res, 400, { error: 'Malformed JSON body' });
+      return;
+    }
+
+    const requestedMerchantId = body.merchantId || req.query?.merchantId || null;
+    if (credentialMerchantId && requestedMerchantId && requestedMerchantId !== credentialMerchantId) {
+      HttpServer.json(res, 403, { error: 'FORBIDDEN', message: 'Cross-tenant pairing-token revocation refused.' });
+      return;
+    }
+
+    const merchantId = credentialMerchantId || requestedMerchantId;
+    if (!merchantId) {
+      HttpServer.json(res, 400, { error: 'merchantId is required for an operator credential.' });
+      return;
+    }
+    const merchant = ctx.merchantRepo?.findById(merchantId);
+    if (!merchant) {
+      HttpServer.json(res, 404, { error: 'MERCHANT_NOT_FOUND' });
+      return;
+    }
+
+    const revoked = revokeOutstandingPairingTokens(ctx, merchantId);
+
+    if (ctx.auditRepo) {
+      try {
+        ctx.auditRepo.log({
+          merchantId,
+          entityType: 'MERCHANT',
+          entityId: merchantId,
+          action: 'SMS_GATEWAY_PAIRING_TOKENS_REVOKED',
+          actorType: 'ADMIN',
+          actorId: req.auth?.actorId || null,
+          details: { revoked }
+        });
+      } catch {
+        console.error('[Poller] Failed to record pairing-token revocation audit event.');
+      }
+    }
+
+    HttpServer.json(res, 200, { success: true, revoked });
   });
 
   // GET /api/v1/admin/sms-gateway/devices

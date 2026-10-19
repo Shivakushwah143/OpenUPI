@@ -28,7 +28,9 @@ class SmsReceiver : BroadcastReceiver() {
                 val body = sms.messageBody ?: ""
                 val timestamp = sms.timestampMillis
 
-                Log.d("SmsReceiver", "Captured incoming bank SMS from $sender: length=${body.length}")
+                // The SMS body, sender and any UTR stay out of logcat; only the
+                // fact that a bank message was captured is recorded.
+                Log.d("SmsReceiver", "Bank SMS captured (length=${body.length})")
 
                 Thread {
                     val success = apiClient.sendSms(sender, body, timestamp)

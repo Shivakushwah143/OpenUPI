@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { EventEmitter } from 'node:events';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PaymentStatus } from '@youpi/common';
+import { PaymentStatus, startRequestTrace } from '@youpi/common';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -504,6 +504,15 @@ export function createPaymentApp(customDb = null, options = {}) {
   }
 
   server.setRequestGuard(async (req, res, pathname, method) => {
+    // Per-request latency trace (correlation id from the caller or generated).
+    // Disable with YOUPI_LATENCY_TRACE=0; nothing else depends on it.
+    if (process.env.YOUPI_LATENCY_TRACE !== '0') {
+      const trace = startRequestTrace(req);
+      req.traceDb = context.db;
+      req.traceDbBefore = { statements: context.db.stats.statements, ms: context.db.stats.ms };
+      res.setHeader('X-Correlation-Id', trace.correlationId);
+    }
+
     // Authenticated surfaces are TLS-only in production (observer hardening item 1).
     const authenticatedSurface = pathname.startsWith('/api/v1/admin/')
       || OBSERVER_SIGNED_PATHS.has(pathname)

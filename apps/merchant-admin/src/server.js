@@ -24,6 +24,7 @@ if (!process.env.BASE_PAYMENT_API_URL && typeof process.loadEnvFile === 'functio
  */
 export const PAIRING_PROXY_ALLOWLIST = Object.freeze({
   '/api/v1/admin/sms-gateway/pair-qr': ['GET'],
+  '/api/v1/admin/sms-gateway/pairing-tokens/revoke': ['POST'],
   '/api/v1/admin/sms-gateway/devices': ['GET']
 });
 

@@ -36,6 +36,7 @@ export const MERCHANT_ALLOWED_ADMIN_PATHS = Object.freeze([
   '/api/v1/admin/merchant-settings',
   '/api/v1/admin/upi-settings',
   '/api/v1/admin/sms-gateway/pair-qr',
+  '/api/v1/admin/sms-gateway/pairing-tokens/revoke',
   '/api/v1/admin/sms-gateway/devices',
   '/api/v1/admin/reconciliation-cases',
   '/api/v1/admin/tunnel/status'
@@ -387,7 +388,28 @@ export function redeemPairingToken(ctx, token) {
     [new Date().toISOString(), row.id]
   );
   if (update.changes !== 1) return { ok: false, code: 'TOKEN_ALREADY_USED' };
-  return { ok: true, merchantId: row.merchant_id };
+  return { ok: true, merchantId: row.merchant_id, tokenId: row.id };
+}
+
+/**
+ * Revokes every outstanding (unused, unexpired) pairing challenge for one
+ * tenant. Used when a pairing QR/token may have been exposed: challenges are
+ * single-use and short-lived, but this closes the window immediately instead of
+ * waiting for the 10-minute expiry.
+ *
+ * Already-used rows keep their original `used_at` so the consumption trail is
+ * never rewritten. Only the token hash is stored, so revocation needs no secret.
+ * @returns {number} number of challenges invalidated
+ */
+export function revokeOutstandingPairingTokens(ctx, merchantId) {
+  if (!merchantId) return 0;
+  const nowIso = new Date().toISOString();
+  const result = ctx.db.execute(
+    `UPDATE observer_pairing_tokens SET used_at = ?
+     WHERE merchant_id = ? AND used_at IS NULL AND expires_at > ?`,
+    [nowIso, merchantId, nowIso]
+  );
+  return result?.changes ?? 0;
 }
 
 /** Removes credential material from tunnel logs before they leave the process. */

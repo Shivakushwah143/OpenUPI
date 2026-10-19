@@ -170,6 +170,37 @@ export class HttpServer {
     this.requestGuard = guard;
   }
 
+  /**
+   * Echoes the request correlation id (and, when the caller asks for it with
+   * `X-Youpi-Trace: 1`, the compact per-segment timing line) on every response.
+   * @param {any} req
+   * @param {any} res
+   */
+  _installTraceHeaders(req, res) {
+    const trace = req.trace;
+    const wantsTiming = String(req.headers['x-youpi-trace'] || '') === '1';
+    const originalWriteHead = res.writeHead;
+    res.writeHead = function patchedWriteHead(...args) {
+      try {
+        if (!res.headersSent) {
+          res.setHeader('X-Correlation-Id', trace.correlationId);
+          if (wantsTiming) {
+            const db = req.traceDb;
+            const before = req.traceDbBefore;
+            const extra = db && before
+              ? {
+                  db_statements: db.stats.statements - before.statements,
+                  db_ms: Math.round((db.stats.ms - before.ms) * 1000) / 1000
+                }
+              : {};
+            res.setHeader('X-Youpi-Trace', trace.header(extra));
+          }
+        }
+      } catch { /* tracing must never break a response */ }
+      return originalWriteHead.apply(this, args);
+    };
+  }
+
   createServer() {
     return http.createServer(async (req, res) => {
       // Handle CORS preflight
@@ -194,12 +225,17 @@ export class HttpServer {
         try {
           const allowed = await this.requestGuard(req, res, pathname, method);
           if (allowed === false) return;
+          if (req.trace) req.trace.mark('guard');
         } catch (err) {
           console.error(`[RequestGuard] ${method} ${pathname}:`, err.message);
           HttpServer.json(res, 401, { error: 'UNAUTHORIZED', message: 'Request rejected by security guard.' });
           return;
         }
       }
+
+      // Correlation-id + opt-in timing headers on every traced response. Done by
+      // wrapping writeHead so no route has to know about tracing.
+      if (req.trace) this._installTraceHeaders(req, res);
 
       for (const route of this.routes) {
         if (route.method === method) {

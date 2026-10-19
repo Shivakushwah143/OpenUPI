@@ -81,9 +81,17 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ### Step 2: Grant Notification Listener Permission
 1. Open the app **YOUPI Observer**.
-2. Tap **Grant Notification Listener Access**.
-3. Android System Settings will open. Toggle **YOUPI Observer** to **Allowed**.
-4. Confirm the system warning dialog.
+2. Tap **Open Notification Access**.
+3. Android System Settings will open. Toggle **YOUPI Payment Observer Service** (the observer app) to **Allowed**.
+4. Confirm the system warning dialog, return to the app and tap **Re-check Access**.
+
+**Android 13+ (Restricted Settings).** Notification access is a protected setting. If the APK was installed from a browser, chat app or file manager, Android shows the toggle greyed out with *"Restricted setting"*. This is a platform security control and must be allowed by the device owner once:
+
+1. In the app tap **Open App Info** (or Settings → Apps → YOUPI SMS Gateway).
+2. Open the top-right ⋮ menu → **Allow restricted settings** → **Allow**.
+3. Return to the app, tap **Open Notification Access**, enable **YOUPI Payment Observer Service**, then **Re-check Access**.
+
+The app shows these steps inline whenever access is missing. Installing through Google Play or `adb install` normally skips this step, but behavior is OEM-dependent, so verify on the target phone. There is no public API to detect or auto-grant restricted settings, and the app never attempts to bypass it.
 
 ### Step 3: Exempt from Battery Optimization (Crucial for 24/7 Uptime)
 To ensure Android OEMs (Xiaomi MIUI, Samsung OneUI, OnePlus OxygenOS, Realme/Oppo ColorOS) do not put the observer to sleep:
@@ -96,7 +104,26 @@ To ensure Android OEMs (Xiaomi MIUI, Samsung OneUI, OnePlus OxygenOS, Realme/Opp
 2. Go to **Observers & Pairing** tab -> Click **+ Pair Android Device**.
 3. In the mobile app, enter the Gateway URL (e.g. `http://192.168.1.50:6100`) and the Enrollment Token.
 4. Tap **Pair with Merchant Gateway**.
-5. The status badge will change to **Status: CONNECTED (Active Observer)** with a green indicator.
+5. The status badge changes to **ACTIVE** with a green indicator once the listener is enabled and a signed heartbeat is acknowledged. The app reports exactly one of:
+   - **NOT PAIRED** — no device credential stored.
+   - **PAIRED / NOT LISTENING** — paired, but notification access is off (no payments can be observed).
+   - **ACTIVE** — paired, listening, gateway reachable.
+   - **ERROR** — gateway unreachable or the device credential was rejected (re-pair required).
+
+The device id assigned by the gateway is shown under the status once pairing succeeds.
+
+### Step 5: Enrollment token handling
+- Pairing challenges are single-use, 256-bit and expire after 10 minutes; only their SHA-256 hash is stored server-side.
+- The app treats the token as a bearer credential: masked input, excluded from autofill and activity-state saving, cleared from the field after redemption (or when the gateway reports it invalid), and never persisted or logged.
+- If a pairing QR/token may have been exposed, revoke every outstanding challenge for the tenant:
+
+```bash
+curl -X POST https://<gateway>/api/v1/admin/sms-gateway/pairing-tokens/revoke \
+  -H "X-Admin-Key: $ADMIN_API_KEY" -H "Content-Type: application/json" \
+  -d '{"merchantId":"<merchant-id>"}'
+```
+
+The Merchant Admin pairing panel exposes the same action (**Revoke Outstanding Tokens**). Redemption and revocation are written to `audit_logs` (`SMS_GATEWAY_PAIRING_TOKEN_REDEEMED`, `SMS_GATEWAY_PAIRING_TOKENS_REVOKED`) without the token value.
 
 ---
 

@@ -65,6 +65,11 @@ export class Database {
     // Tracks transaction nesting depth so composed repository calls share ONE ACID unit.
     this._txDepth = 0;
 
+    // Opt-in statement accounting for latency tracing (YOUPI_DB_STATS=1). Off by
+    // default: production pays nothing, benchmarks can attribute DB time per request.
+    this._collectStats = process.env.YOUPI_DB_STATS === '1';
+    this.stats = { statements: 0, ms: 0 };
+
     // Auto-initialize SQLite on first boot if core tables do not exist
     if (!options.inMemory && options.autoMigrate !== false) {
       ensureDatabaseInitialized(this);
@@ -88,8 +93,23 @@ export class Database {
    */
   execute(sql, params = []) {
     const normalized = this.normalizeSql(sql);
-    const stmt = this.db.prepare(normalized);
-    return stmt.run(...params);
+    if (!this._collectStats) {
+      const stmt = this.db.prepare(normalized);
+      return stmt.run(...params);
+    }
+    const t0 = process.hrtime.bigint();
+    try {
+      const stmt = this.db.prepare(normalized);
+      return stmt.run(...params);
+    } finally {
+      this._accountStatement(t0);
+    }
+  }
+
+  /** @param {bigint} t0 */
+  _accountStatement(t0) {
+    this.stats.statements += 1;
+    this.stats.ms += Number(process.hrtime.bigint() - t0) / 1e6;
   }
 
   run(sql, params = []) {
@@ -104,8 +124,17 @@ export class Database {
    */
   query(sql, params = []) {
     const normalized = this.normalizeSql(sql);
-    const stmt = this.db.prepare(normalized);
-    return stmt.all(...params);
+    if (!this._collectStats) {
+      const stmt = this.db.prepare(normalized);
+      return stmt.all(...params);
+    }
+    const t0 = process.hrtime.bigint();
+    try {
+      const stmt = this.db.prepare(normalized);
+      return stmt.all(...params);
+    } finally {
+      this._accountStatement(t0);
+    }
   }
 
   /**
@@ -116,9 +145,19 @@ export class Database {
    */
   queryOne(sql, params = []) {
     const normalized = this.normalizeSql(sql);
-    const stmt = this.db.prepare(normalized);
-    const res = stmt.get(...params);
-    return res !== undefined ? res : null;
+    if (!this._collectStats) {
+      const stmt = this.db.prepare(normalized);
+      const res = stmt.get(...params);
+      return res !== undefined ? res : null;
+    }
+    const t0 = process.hrtime.bigint();
+    try {
+      const stmt = this.db.prepare(normalized);
+      const res = stmt.get(...params);
+      return res !== undefined ? res : null;
+    } finally {
+      this._accountStatement(t0);
+    }
   }
 
   /**

@@ -121,6 +121,9 @@ export class PaymentVerificationPipeline {
     const isTest = Boolean(input.isTest);
     const testModeActive = Boolean(input.testModeActive);
     const rawText = (input.rawText || '').toString();
+    // Optional request-scoped latency trace (see @youpi/common LatencyTrace).
+    // Absent in unit tests and any caller that does not pass one: zero overhead.
+    const trace = input.trace || null;
 
     // =========================================================================
     // [ STAGE 1 ]: Load + Normalize + Preserve Raw Evidence
@@ -527,6 +530,8 @@ export class PaymentVerificationPipeline {
       receivedAt
     };
 
+    if (trace) trace.mark('parse');
+
     stage3 = {
       stage: 3,
       name: 'PARSER',
@@ -744,6 +749,8 @@ export class PaymentVerificationPipeline {
         session
       });
     }
+
+    if (trace) trace.mark('match');
 
     stage4 = {
       stage: 4,
@@ -1007,6 +1014,7 @@ export class PaymentVerificationPipeline {
         details: 'Security and fraud pattern scans passed.'
       };
     }
+    if (trace) trace.mark('security');
 
     // =========================================================================
     // [ STAGE 6 ]: Attribution
@@ -1065,6 +1073,8 @@ export class PaymentVerificationPipeline {
           verificationLevel: 1,
           verificationTag: 'DEFAULT'
         };
+
+    if (trace) trace.mark('attribution');
 
     stage6 = {
       stage: 6,
