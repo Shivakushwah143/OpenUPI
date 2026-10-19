@@ -366,6 +366,31 @@ Never run `down -v` unless you explicitly intend to delete the SQLite volume.
 
 ---
 
+## 9a. Mobile / responsive verification
+
+The merchant dashboard, test console and guest checkout are audited in a real
+headless Chrome at **1440 (desktop), 768 (tablet) and 390 (phone)** px. No
+Playwright/Puppeteer dependency is required — the script drives the locally
+installed Chrome over the DevTools Protocol.
+
+```bash
+# CHROME_PATH=<path to chrome> if it is not in a standard location
+npm run audit:layout
+# screenshots + report.json -> artifacts/mobile-audit/
+```
+
+The audit fails when any current page has an element outside the viewport or a
+phone-width inline grid whose content overflows its card. It also renders the
+`HEAD` version of each page for before/after screenshots; those baseline issues
+are printed for comparison and never fail the run.
+
+`npm test` covers the same contracts statically
+(`apps/merchant-admin/src/__tests__/responsive-ui.test.js`), so CI without a
+browser still catches a removed breakpoint, a disabled zoom lock or an
+unwrapped data table.
+
+---
+
 ## 10. Known staging constraints
 
 - **OTP delivery**: WhatsApp/Berry is disabled. Use the test console (§6a) for a
@@ -373,6 +398,8 @@ Never run `down -v` unless you explicitly intend to delete the SQLite volume.
   server log. Do not expose those logs publicly.
 - **Test console**: opt-in via `YOUPI_TEST_CONSOLE_ENABLED`; keep it off in
   production and never proxy port 6001.
+- **Responsive UI**: verified for the dashboard, test console and checkout. The
+  Android observer app is a native surface and is not covered by the browser audit.
 - **Gmail/browser observers**: not started. Verification relies on the signed
   Android observer (and any other enabled observer you add later).
 - **Admin**: not proxied by Nginx. Use the SSH tunnel.
