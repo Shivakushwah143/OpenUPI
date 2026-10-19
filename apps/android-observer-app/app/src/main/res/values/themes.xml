@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- MainActivity extends AppCompatActivity, which requires a Theme.AppCompat
+     descendant. The previous @android:style/Theme.DeviceDefault.Light.NoActionBar
+     is a platform theme and made onCreate() throw
+     "You need to use a Theme.AppCompat theme (or descendant) with this activity."
+     The parent keeps the previous light, action-bar-less look. -->
+<resources>
+    <style name="Theme.YoupiObserver" parent="Theme.AppCompat.Light.NoActionBar" />
+</resources>

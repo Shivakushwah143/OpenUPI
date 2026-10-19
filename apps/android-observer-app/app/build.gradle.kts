@@ -67,4 +67,7 @@ dependencies {
     implementation("com.google.android.material:material:1.11.0")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    // Local JVM tests for the pure observer-state resolver (no device required).
+    testImplementation("junit:junit:4.13.2")
 }

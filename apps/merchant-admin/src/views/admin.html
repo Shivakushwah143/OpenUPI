@@ -1041,6 +1041,7 @@
       <span>🛡️</span>
       <span>Security</span>
     </button>
+    {{TEST_CONSOLE_NAV}}
   </nav>
 
   <!-- SECONDARY SUB-NAVIGATION BAR (Dynamically adapts per section) -->
@@ -2778,8 +2779,9 @@
               <button class="btn btn-secondary" style="font-size:0.7rem; padding:0.2rem 0.5rem; margin-left:0.5rem;"
                 onclick="copySmsToken()">📋 Copy</button>
             </div>
-            <div style="display:flex; justify-content:center; gap:0.5rem;">
+            <div style="display:flex; justify-content:center; gap:0.5rem; flex-wrap:wrap;">
               <button class="btn btn-secondary" onclick="fetchSmsPairQr()">🔄 Refresh QR</button>
+              <button class="btn btn-danger" onclick="revokeSmsPairTokens()">🚫 Revoke Outstanding Tokens</button>
               <a class="btn btn-success" href="/youpi-sms-gateway.apk" download="youpi-sms-gateway.apk">📲 Download
                 Android APK</a>
             </div>
@@ -4966,6 +4968,28 @@
         if (tok2 && data.enrollmentToken) tok2.textContent = data.enrollmentToken;
       } catch (e) {
         box.innerHTML = '<span style="font-size:0.75rem; color:#ef4444;">Failed to load QR</span>';
+      }
+    }
+
+    async function revokeSmsPairTokens() {
+      if (!confirm('Revoke every outstanding enrollment token? Any pairing QR shown before now will stop working.')) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/v1/admin/sms-gateway/pairing-tokens/revoke`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error();
+        const box = document.getElementById('smsPairQrBox');
+        if (box) box.textContent = 'Tokens revoked. Refresh QR to pair a new phone.';
+        const tok1 = document.getElementById('smsTokenVal');
+        const tok2 = document.getElementById('smsTokenVal2');
+        if (tok1) tok1.textContent = '—';
+        if (tok2) tok2.textContent = '—';
+        showAdminToast(`Revoked ${data.revoked ?? 0} outstanding enrollment token(s).`);
+      } catch (e) {
+        showAdminToast('Could not revoke pairing tokens.');
       }
     }
 

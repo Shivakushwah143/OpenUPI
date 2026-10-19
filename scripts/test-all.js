@@ -21,6 +21,7 @@ const testFiles = [
   'apps/sms-observer/src/__tests__/sms-observer.test.js',
   'apps/android-observer-app/__tests__/android-observer.test.js',
   'apps/android-observer-app/__tests__/android-observer-paytm-bob.test.js',
+  'apps/android-observer-app/__tests__/android-security-review.test.js',
   'apps/control-center/src/__tests__/control-center.test.js',
   'apps/payment-api/src/__tests__/security-hardening.test.js',
   'apps/payment-api/src/__tests__/security-hardening-sprint2.test.js',
@@ -37,6 +38,7 @@ const testFiles = [
   'apps/payment-api/src/__tests__/whatsapp-berry-auth.test.js',
   'apps/payment-api/src/__tests__/whitelabel-branding.test.js',
   'apps/payment-api/src/__tests__/cod-parallel-timer-decoupling.test.js',
+  'apps/payment-api/src/__tests__/staging-test-console.test.js',
   'scripts/chaos-concurrency.test.js',
   'scripts/production-infrastructure.test.js'
 ];

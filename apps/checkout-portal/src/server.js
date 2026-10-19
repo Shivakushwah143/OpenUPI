@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +41,17 @@ export class CheckoutServer {
     } catch {}
 
     this.apiBaseUrl = options.apiBaseUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100';
+    // Server-to-server calls must never leave the container through the public URL.
+    // In containers the API is reached over the compose network (PAYMENT_API_INTERNAL_URL);
+    // on a single host the historical 127.0.0.1 loopback target is preserved.
+    const internalBase = (options.apiInternalUrl || process.env.PAYMENT_API_INTERNAL_URL || `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`).replace(/\/+$/, '');
+    const parsedInternal = new URL(internalBase);
+    this.apiInternalBaseUrl = internalBase;
+    this.apiTransport = parsedInternal.protocol === 'https:' ? https : http;
+    this.apiTarget = {
+      hostname: parsedInternal.hostname,
+      port: Number(parsedInternal.port || (parsedInternal.protocol === 'https:' ? 443 : 80))
+    };
     this.htmlTemplatePath = path.join(__dirname, 'views', 'checkout.html');
     this.sdkScriptPath = path.join(__dirname, 'sdk', 'youpi-checkout.js');
     this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
@@ -47,12 +59,11 @@ export class CheckoutServer {
 
   async fetchPaymentState(paymentId, checkoutToken = '') {
     try {
-      const internalPort = process.env.PAYMENT_API_PORT || 6100;
       // Payment-status polling is credential-scoped: forward the checkout token the
       // browser received in the checkout URL (?t=) so the API can authorize the read.
       const headers = { 'X-Internal-Render': 'true' };
       if (checkoutToken) headers['X-Checkout-Token'] = checkoutToken;
-      const res = await fetch(`http://127.0.0.1:${internalPort}/api/v1/checkout/${paymentId}/state`, {
+      const res = await fetch(`${this.apiInternalBaseUrl}/api/v1/checkout/${paymentId}/state`, {
         headers
       });
       if (!res.ok) return null;
@@ -151,9 +162,9 @@ export class CheckoutServer {
 
       // Transparent API Proxy: /api/* -> Payment Core REST API
       if (pathname.startsWith('/api/')) {
-        const targetPort = Number(process.env.PAYMENT_API_PORT || 6100);
-        const proxyReq = http.request({
-          hostname: '127.0.0.1',
+        const targetPort = this.apiTarget.port;
+        const proxyReq = this.apiTransport.request({
+          hostname: this.apiTarget.hostname,
           port: targetPort,
           path: req.url,
           method: req.method,

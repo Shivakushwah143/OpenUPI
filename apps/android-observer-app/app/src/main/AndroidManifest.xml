@@ -34,7 +34,7 @@
         android:allowBackup="false"
         android:label="YOUPI SMS Gateway"
         android:icon="@android:drawable/stat_notify_chat"
-        android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar"
+        android:theme="@style/Theme.YoupiObserver"
         android:usesCleartextTraffic="true">
 
         <activity

@@ -123,6 +123,20 @@ export function runMigrations(targetDb) {
   `); } catch {}
   try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_txn_unique_ref ON bank_transaction_ledger (receiving_account_id, bank_reference) WHERE bank_reference IS NOT NULL;"); } catch {}
   try { db.exec("CREATE INDEX IF NOT EXISTS idx_bank_txn_consumer ON bank_transaction_ledger (consumed_by_session_id);"); } catch {}
+  // Observation → matched → persisted latency evidence for the staging test console.
+  try { db.exec(`
+    CREATE TABLE IF NOT EXISTS payment_observation_latency (
+      observation_id TEXT PRIMARY KEY,
+      payment_id TEXT,
+      receiving_account_id TEXT,
+      received_at TEXT NOT NULL,
+      matched_ms REAL,
+      persisted_ms REAL,
+      ingest_total_ms REAL,
+      segments_json TEXT NOT NULL DEFAULT '{}'
+    );
+  `); } catch {}
+  try { db.exec("CREATE INDEX IF NOT EXISTS idx_observation_latency_payment ON payment_observation_latency (payment_id, received_at);"); } catch {}
   try { db.exec(`
     CREATE TABLE IF NOT EXISTS payment_events_outbox (
       id TEXT PRIMARY KEY,

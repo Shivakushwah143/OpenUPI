@@ -3554,8 +3554,22 @@
                     <div style="font-size:12px; color:#64748b; line-height:1.4;">
                       Open any UPI app on your phone to scan and pay directly.
                     </div>
+                    <!-- Scoped guest checkout only: show the exact receiving VPA so a
+                         friend can verify the payee before paying. Regular store
+                         checkouts keep the VPA hidden. -->
+                    <div id="guestVpaLine" style="display:none; font-size:12px; color:#334155; margin-top:8px; line-height:1.4;">
+                      Paying to <strong id="guestVpaValue"></strong>
+                    </div>
                   </div>
                 </div>
+
+                <!-- Mobile UPI handoff: standard upi://pay scheme, resolved by the
+                     phone's installed UPI app. Hidden on desktop and until the
+                     server issues a valid ACTIVE UPI URI. -->
+                <a id="btnMobileUpi" href="#" rel="noopener noreferrer"
+                  style="display:none; width:100%; margin-top:12px; padding:14px 16px; border-radius:12px; background:var(--ypg-blue); color:#ffffff; font-weight:800; font-size:0.95rem; text-align:center; text-decoration:none;">
+                  Open UPI App to Pay
+                </a>
                 <!-- UPI Payment Instructions Guide -->
                 <div class="ypg-instructions-card">
                   <div class="ypg-instruction-step">
@@ -5613,6 +5627,29 @@
 
     function renderState(data) {
       state = data;
+
+      // Mobile UPI handoff: only expose a real server-built upi://pay URI.
+      const mobileUpiLink = document.getElementById('btnMobileUpi');
+      if (mobileUpiLink) {
+        if (data.upiUri) {
+          mobileUpiLink.href = data.upiUri;
+          mobileUpiLink.textContent = `Open UPI App to Pay \u20b9${data.amount || ''}`.trim();
+          mobileUpiLink.style.display = 'block';
+        } else {
+          mobileUpiLink.removeAttribute('href');
+          mobileUpiLink.style.display = 'none';
+        }
+      }
+
+      // Scoped guest checkout: reveal the exact receiving VPA only for sessions
+      // explicitly created by the staging test console.
+      const guestVpaLine = document.getElementById('guestVpaLine');
+      if (guestVpaLine) {
+        const showGuestVpa = data.guestCheckout === true && data.testConsole === true && Boolean(data.payeeVpa);
+        guestVpaLine.style.display = showGuestVpa ? 'block' : 'none';
+        if (showGuestVpa) document.getElementById('guestVpaValue').textContent = data.payeeVpa;
+      }
+
       const b = data.branding || {};
       const appName = b.appName || 'YouPI PG';
       const merchantName = data.merchantName || 'Merchant Checkout';
@@ -6091,8 +6128,12 @@
         }
       }
       const hasCustomer = Boolean(data.customer || activeCustomer);
+      // Scoped guest checkout: sessions created by the staging test console are
+      // explicitly marked by the server. Only those sessions skip the WhatsApp OTP
+      // gate; every other checkout keeps the pre-gateway identity requirement.
+      const isGuestCheckout = data.guestCheckout === true;
 
-      if (!hasCustomer) {
+      if (!hasCustomer && !isGuestCheckout) {
         setGatewayAuthMode(true);
         const stepMob = document.getElementById('authStepMobile');
         const isAlreadyOnMobile = stepMob && !stepMob.hidden;
@@ -6104,11 +6145,13 @@
       }
 
       // Authenticated Customer
-      if (activeCustomer) {
-        updateCustomerDisplay(activeCustomer);
-        // Automatically bind customer to the payment session if session is INITIATED or unbound
-        if (activeToken && PAYMENT_ID && (!data.customer || data.status === 'INITIATED')) {
-          window.autoBindCustomerToSession(activeCustomer.id, activeToken);
+      if (hasCustomer) {
+        if (activeCustomer) {
+          updateCustomerDisplay(activeCustomer);
+          // Automatically bind customer to the payment session if session is INITIATED or unbound
+          if (activeToken && PAYMENT_ID && (!data.customer || data.status === 'INITIATED')) {
+            window.autoBindCustomerToSession(activeCustomer.id, activeToken);
+          }
         }
       }
       setGatewayAuthMode(false);
@@ -6323,7 +6366,7 @@
       const container = document.getElementById('qrImageContainer');
       if (!container) return;
       try {
-        const res = await fetch(`/checkout/${PAYMENT_ID}/qr.svg`);
+        const res = await fetch(withCheckoutToken(`/checkout/${PAYMENT_ID}/qr.svg`));
         if (res.ok) {
           const svg = await res.text();
           if (svg && svg.includes('<svg')) {
@@ -6337,7 +6380,7 @@
       // Automatic retry to guarantee QR code is loaded
       setTimeout(async () => {
         try {
-          const res = await fetch(`/checkout/${PAYMENT_ID}/qr.svg`);
+          const res = await fetch(withCheckoutToken(`/checkout/${PAYMENT_ID}/qr.svg`));
           if (res.ok) {
             const svg = await res.text();
             if (svg && svg.includes('<svg')) {

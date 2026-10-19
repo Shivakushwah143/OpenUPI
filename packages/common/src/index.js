@@ -9,3 +9,4 @@ export * from './state-machine.js';
 export * from './observer-auth.js';
 export * from './secret-vault.js';
 export * from './runtime-config.js';
+export * from './latency-trace.js';

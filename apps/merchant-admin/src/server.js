@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDatabase, MerchantRepository, SupportTicketRepository } from '@youpi/db';
+import { TestConsole, readTestConsoleConfig } from './test-console.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,24 +25,75 @@ if (!process.env.BASE_PAYMENT_API_URL && typeof process.loadEnvFile === 'functio
  */
 export const PAIRING_PROXY_ALLOWLIST = Object.freeze({
   '/api/v1/admin/sms-gateway/pair-qr': ['GET'],
+  '/api/v1/admin/sms-gateway/pairing-tokens/revoke': ['POST'],
   '/api/v1/admin/sms-gateway/devices': ['GET']
 });
 
 const isLoopbackAddress = address => {
-  const addr = String(address || '');
-  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+  const addr = String(address || '').replace(/^::ffff:/, '');
+  return addr === '127.0.0.1' || addr === '::1';
 };
 
 /**
+ * Explicitly trusted reverse-proxy/Docker-gateway sources. Attaching the merchant
+ * credential is a privileged action, so anything outside loopback must be opted
+ * into by the operator. Accepts comma-separated IPv4 addresses and CIDRs.
+ */
+export function resolveTrustedAdminProxies(env = process.env) {
+  return String(env.MERCHANT_ADMIN_TRUSTED_PROXIES || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+function ipv4ToInt(address) {
+  const parts = String(address || '').replace(/^::ffff:/, '').split('.');
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null;
+    const octet = Number(part);
+    if (octet > 255) return null;
+    value = (value * 256) + octet;
+  }
+  return value >>> 0;
+}
+
+function addressMatchesEntry(address, entry) {
+  const addr = String(address || '').replace(/^::ffff:/, '');
+  if (addr === entry) return true;
+  if (!entry.includes('/')) return false;
+
+  const [network, bitsRaw] = entry.split('/');
+  const bits = Number(bitsRaw);
+  const addrInt = ipv4ToInt(addr);
+  const networkInt = ipv4ToInt(network);
+  if (addrInt === null || networkInt === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (addrInt & mask) === (networkInt & mask);
+}
+
+/**
+ * Loopback always qualifies (single-host installs). Container deployments add the
+ * compose gateway CIDR through MERCHANT_ADMIN_TRUSTED_PROXIES.
+ */
+export function isTrustedAdminSource(address, env = process.env) {
+  if (isLoopbackAddress(address)) return true;
+  return resolveTrustedAdminProxies(env).some(entry => addressMatchesEntry(address, entry));
+}
+
+/**
  * Decides whether to attach the merchant API key to a proxied gateway request.
- * Requires: loopback caller, allowlisted path+method, and NO caller-supplied
- * gateway credential (which is forwarded untouched instead).
+ * Requires: loopback (or explicitly trusted proxy) caller, allowlisted
+ * path+method, and NO caller-supplied gateway credential (which is forwarded
+ * untouched instead).
  * @param {{ socket?: { remoteAddress?: string }, method?: string, headers?: Record<string, any> }} req
  * @param {string} pathname
  * @returns {boolean}
  */
 export function shouldAttachPairingCredential(req, pathname) {
-  if (!isLoopbackAddress(req?.socket?.remoteAddress)) return false;
+  if (!isTrustedAdminSource(req?.socket?.remoteAddress)) return false;
 
   const headers = req?.headers || {};
   if (headers['x-api-key'] || headers['x-admin-key'] || headers['authorization']) return false;
@@ -64,8 +116,23 @@ export class AdminServer {
   constructor(options = {}) {
     this.db = options.db || getDatabase();
     this.apiBaseUrl = options.apiBaseUrl || process.env.BASE_PAYMENT_API_URL || 'http://localhost:6100';
+    // Internal container-to-container target; falls back to the historical loopback.
+    const internalBase = (options.apiInternalUrl || process.env.PAYMENT_API_INTERNAL_URL || `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`).replace(/\/+$/, '');
+    const parsedInternal = new URL(internalBase);
+    this.apiInternalBaseUrl = internalBase;
+    this.apiTarget = {
+      hostname: parsedInternal.hostname,
+      port: Number(parsedInternal.port || (parsedInternal.protocol === 'https:' ? 443 : 80))
+    };
     this.merchantRepo = new MerchantRepository(this.db);
     this.ticketRepo = new SupportTicketRepository(this.db);
+    this.testConsole = new TestConsole({
+      db: this.db,
+      merchantRepo: this.merchantRepo,
+      apiTarget: this.apiTarget,
+      apiInternalBaseUrl: this.apiInternalBaseUrl,
+      config: readTestConsoleConfig(options.env || process.env)
+    });
     this.htmlTemplatePath = path.join(__dirname, 'views', 'admin.html');
     this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
   }
@@ -83,6 +150,9 @@ export class AdminServer {
     // The legacy static enrollment secret is no longer accepted by the gateway
     // (pairing uses single-use challenges), so it is never rendered into HTML.
     html = html.replaceAll('{{ANDROID_ENROLLMENT_SECRET}}', '');
+    // Staging-only test console entry. The placeholder renders to an empty string
+    // unless the operator explicitly enabled the console.
+    html = html.replaceAll('{{TEST_CONSOLE_NAV}}', this.testConsole.navHtml());
     return html;
   }
 
@@ -105,6 +175,25 @@ export class AdminServer {
       if (pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'UP', service: 'merchant-admin' }));
+        return;
+      }
+
+      // Staging-only Payment Test Console (opt-in; disabled by default). It is
+      // handled before the generic /api/ proxy so no console route can ever be
+      // forwarded to the gateway without the console's own session check.
+      if (pathname === '/test-console' || pathname.startsWith('/api/test-console/')) {
+        try {
+          const handled = await this.testConsole.handle(req, res, pathname);
+          if (handled) return;
+        } catch (err) {
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'TEST_CONSOLE_UNAVAILABLE', details: err.message }));
+          }
+          return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Test Console Disabled');
         return;
       }
 
@@ -153,7 +242,7 @@ export class AdminServer {
 
       // Transparent API Proxy: /api/* -> Payment Core REST API
       if (pathname.startsWith('/api/')) {
-        const targetPort = Number(process.env.PAYMENT_API_PORT || 6100);
+        const targetPort = this.apiTarget.port;
         const defaultMerchant = this.merchantRepo.getDefault ? this.merchantRepo.getDefault() : (this.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || this.merchantRepo.findAll()[0]);
         const defaultMerchantId = defaultMerchant?.id || '00000000-0000-0000-0000-000000000001';
 
@@ -162,7 +251,10 @@ export class AdminServer {
           'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
           host: `localhost:${targetPort}`,
           'x-forwarded-host': req.headers.host || '',
-          'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
+          // The console is reached over loopback or an SSH tunnel (never a public
+          // plaintext listener). Forward the real scheme when a proxy supplies it,
+          // otherwise present the transport as secure to the API's TLS guard.
+          'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'https'
         };
 
         // Pairing QR + device management are the only gateway calls this local
@@ -175,7 +267,7 @@ export class AdminServer {
         }
 
         const proxyReq = http.request({
-          hostname: '127.0.0.1',
+          hostname: this.apiTarget.hostname,
           port: targetPort,
           path: req.url,
           method: req.method,

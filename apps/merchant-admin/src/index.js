@@ -25,5 +25,19 @@ export function startAdminServer(port = null, options = {}) {
 
 // Auto-run if executed directly as main script
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  startAdminServer();
+  const running = await startAdminServer();
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Merchant Admin] ${signal} received; shutting down gracefully...`);
+    const forceExit = setTimeout(() => process.exit(1), 10000);
+    forceExit.unref();
+    try {
+      await running.close();
+    } catch {}
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

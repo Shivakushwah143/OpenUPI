@@ -13,9 +13,13 @@ class HeartbeatScheduler(private val context: Context) {
         override fun run() {
             if (!isRunning) return
             Thread {
-                apiClient.sendHeartbeat()
+                // null means "not paired"; keep the last known status untouched.
+                val outcome = apiClient.sendHeartbeat()
+                if (outcome != null) {
+                    ObserverRuntime.recordHeartbeat(outcome)
+                }
             }.start()
-            handler.postDelayed(this, 60000) // Every 60 seconds
+            handler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
         }
     }
 
@@ -28,5 +32,9 @@ class HeartbeatScheduler(private val context: Context) {
     fun stop() {
         isRunning = false
         handler.removeCallbacks(runnable)
+    }
+
+    companion object {
+        const val HEARTBEAT_INTERVAL_MS = 60_000L
     }
 }

@@ -69,6 +69,39 @@ describe('Android Payment Observer Integration Tests', () => {
     await assert.rejects(() => driver.pair(legacySecret), /Device pairing failed/);
   });
 
+  test('revokes outstanding pairing tokens and audits consumption/revocation without storing the token', async () => {
+    const base = `http://localhost:${apiInstance.port}`;
+
+    // A fresh challenge, as if a QR had been screenshotted or leaked.
+    const qrRes = await authFetch(`${base}/api/v1/admin/sms-gateway/pair-qr`);
+    assert.equal(qrRes.status, 200);
+    const qr = await qrRes.json();
+
+    const revokeRes = await authFetch(`${base}/api/v1/admin/sms-gateway/pairing-tokens/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ merchantId: qr.payload.merchantId })
+    });
+    assert.equal(revokeRes.status, 200);
+    const revokeBody = await revokeRes.json();
+    assert.ok(revokeBody.revoked >= 1, 'the outstanding challenge must be revoked');
+
+    const freshDriver = new AndroidObserverDriver({ apiBaseUrl: base, deviceName: 'Revocation Test Phone' });
+    await assert.rejects(
+      () => freshDriver.pair(qr.enrollmentToken),
+      /Device pairing failed/,
+      'a revoked challenge must not enroll a device'
+    );
+
+    const auditRows = testDb.query(
+      "SELECT action, details FROM audit_logs WHERE action IN ('SMS_GATEWAY_PAIRING_TOKEN_REDEEMED', 'SMS_GATEWAY_PAIRING_TOKENS_REVOKED')"
+    );
+    assert.ok(auditRows.some(row => row.action === 'SMS_GATEWAY_PAIRING_TOKEN_REDEEMED'));
+    assert.ok(auditRows.some(row => row.action === 'SMS_GATEWAY_PAIRING_TOKENS_REVOKED'));
+    // Audit rows carry the challenge id, never the bearer token itself.
+    assert.equal(JSON.stringify(auditRows).includes(qr.enrollmentToken), false);
+  });
+
   test('sends heartbeat acknowledging liveness', async () => {
     const hbResult = await driver.sendHeartbeat();
     assert.equal(hbResult.status, 'HEARTBEAT_ACK');

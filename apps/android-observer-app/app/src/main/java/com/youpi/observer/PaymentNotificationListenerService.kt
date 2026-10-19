@@ -32,7 +32,9 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
             ?: extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
 
-        Log.d(TAG, "Observed notification from $packageName: $title - $text")
+        // Notification contents (title, text, amount, UTR, sender VPA) are payment
+        // data: they are parsed and transmitted, but never written to logcat.
+        Log.d(TAG, "Relevant notification observed from $packageName")
 
         // 2. Parse credit amount, reference, and sender
         val parsed = NotificationParser.parse(
@@ -42,7 +44,7 @@ class PaymentNotificationListenerService : NotificationListenerService() {
             postTime = sbn.postTime
         ) ?: return
 
-        Log.i(TAG, "Extracted payment observation: ₹${parsed.amountRupees} (${parsed.amountPaise} paise) Ref: ${parsed.bankReferenceNumber}")
+        Log.i(TAG, "Credit notification parsed; dispatching signed observation.")
 
         // 3. Dispatch observation asynchronously to self-hosted backend
         executor.execute {
@@ -54,7 +56,8 @@ class PaymentNotificationListenerService : NotificationListenerService() {
                     Log.w(TAG, "Backend did not acknowledge observation transmission.")
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to transmit observation: ${e.message}", e)
+                // Only the failure class: exception messages can carry request URLs.
+                Log.e(TAG, "Failed to transmit observation (${e.javaClass.simpleName})")
             }
         }
     }
