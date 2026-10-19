@@ -17,6 +17,7 @@ COPY packages/merchant-sdk/package.json ./packages/merchant-sdk/
 COPY apps/payment-api/package.json ./apps/payment-api/
 COPY apps/checkout-portal/package.json ./apps/checkout-portal/
 COPY apps/merchant-admin/package.json ./apps/merchant-admin/
+COPY apps/openupi-admin/package.json ./apps/openupi-admin/
 COPY apps/sms-observer/package.json ./apps/sms-observer/
 COPY apps/gmail-observer/package.json ./apps/gmail-observer/
 COPY apps/control-center/package.json ./apps/control-center/
@@ -43,7 +44,7 @@ RUN mkdir -p /data && chown node:node /data && chmod 700 /data
 
 USER node
 
-EXPOSE 6100 7000 6001
+EXPOSE 6100 7000 6001 6200
 
 # Default service; compose overrides the command per container.
 CMD ["node", "apps/payment-api/src/index.js"]

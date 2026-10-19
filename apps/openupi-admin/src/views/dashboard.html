@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>OpenUPI Admin</title>
+  <meta name="description" content="OpenUPI administration: payment links, settlement status and observer health.">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="theme-color" content="#0b1020">
+  <link rel="icon" type="image/svg+xml" href="/assets/brand/favicon.svg">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <img class="brand-mark" src="/assets/brand/logo.svg" alt="" width="36" height="36">
+        <div class="brand-lockup">
+          <span class="brand-name">OpenUPI</span>
+          <span class="brand-sub">Admin</span>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav" aria-label="Primary">
+        <button type="button" class="nav-item" data-view="overview" aria-current="page">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-5H4v5Zm10 0h6v-9h-6v9Zm0-16v5h6V4h-6Z"/></svg>
+          <span>Overview</span>
+        </button>
+        <button type="button" class="nav-item" data-view="links">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 13.4a4 4 0 0 1 0-5.66l2.83-2.83a4 4 0 0 1 5.66 5.66l-1.42 1.41-1.41-1.41 1.41-1.42a2 2 0 0 0-2.83-2.83L12 9.17a2 2 0 0 0 0 2.83l-1.4 1.4Zm2.8-2.8a4 4 0 0 1 0 5.66l-2.83 2.83a4 4 0 0 1-5.66-5.66l1.42-1.41 1.41 1.41-1.41 1.42a2 2 0 0 0 2.83 2.83L12 14.83a2 2 0 0 0 0-2.83l1.4-1.4Z"/></svg>
+          <span>Payment Links</span>
+        </button>
+        <button type="button" class="nav-item" data-view="transactions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v2H4V5Zm0 6h10v2H4v-2Zm0 6h16v2H4v-2Z"/></svg>
+          <span>Transactions</span>
+        </button>
+        <button type="button" class="nav-item" data-view="observers">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Zm5 16.5a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5ZM8 5v11h8V5H8Z"/></svg>
+          <span>Observers</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="merchant-card">
+          <span class="avatar" id="merchantInitial" aria-hidden="true">O</span>
+          <div class="merchant-meta">
+            <strong id="merchantName">OpenUPI merchant</strong>
+            <small id="payeeVpa">Loading receiving VPA…</small>
+          </div>
+        </div>
+        <p class="sidebar-note">Server-side session · keys never reach this browser</p>
+      </div>
+    </aside>
+
+    <div class="content-col">
+      <header class="topbar">
+        <div class="topbar-brand">
+          <img class="brand-mark brand-mark--sm" src="/assets/brand/logo.svg" alt="" width="28" height="28">
+          <span>OpenUPI</span>
+        </div>
+        <div class="topbar-right">
+          <span id="systemStatus" class="status-pill status-pill--idle" data-state="loading">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="systemStatusText">Checking systems</span>
+          </span>
+          <button id="logoutBtn" class="icon-btn" type="button" title="Sign out" aria-label="Sign out">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h5v-2H5V5h5V3Zm6.2 4.4-1.4 1.4L17.2 11H9v2h8.2l-2.4 2.2 1.4 1.4L21 12l-4.8-4.6Z"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="main" class="main" tabindex="-1">
+        <!-- ============================ OVERVIEW ============================ -->
+        <section class="view" data-view-panel="overview" aria-labelledby="overview-title">
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Dashboard</p>
+              <h1 id="overview-title">Overview</h1>
+              <p class="muted" id="overviewSubtitle">Live status of your payment gateway.</p>
+            </div>
+            <button id="ovRefresh" class="ghost-btn" type="button">Refresh</button>
+          </div>
+
+          <div id="ovError" class="banner banner--error" role="alert" hidden>
+            <span class="banner-text"></span>
+            <button type="button" class="ghost-btn" data-retry="overview">Retry</button>
+          </div>
+
+          <div class="kpi-grid" id="ovKpis" aria-busy="true">
+            <article class="kpi">
+              <p class="kpi-label">Collected (recent)</p>
+              <p class="kpi-value" id="ovCollected">—</p>
+              <p class="kpi-meta" id="ovCollectedMeta">Bank-confirmed payments only</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Awaiting payment</p>
+              <p class="kpi-value" id="ovAwaiting">—</p>
+              <p class="kpi-meta">Links ready to be paid</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Payment detected</p>
+              <p class="kpi-value" id="ovDetected">—</p>
+              <p class="kpi-meta">Credit seen, awaiting bank check</p>
+            </article>
+            <article class="kpi">
+              <p class="kpi-label">Android observers</p>
+              <p class="kpi-value" id="ovObserver">—</p>
+              <p class="kpi-meta" id="ovObserverMeta">No heartbeat yet</p>
+            </article>
+          </div>
+
+          <div class="grid-2">
+            <section class="card" aria-labelledby="ov-recent-title">
+              <div class="card-head">
+                <h2 id="ov-recent-title">Recent activity</h2>
+                <button type="button" class="link-btn" data-goto="transactions">View all</button>
+              </div>
+              <ul class="activity-list" id="ovRecent" aria-live="polite"></ul>
+              <p class="empty" id="ovRecentEmpty" hidden>No payments yet. Create your first payment link.</p>
+            </section>
+
+            <div class="stack">
+              <section class="card" aria-labelledby="ov-observers-title">
+                <div class="card-head">
+                  <h2 id="ov-observers-title">Observers</h2>
+                  <button type="button" class="link-btn" data-goto="observers">Details</button>
+                </div>
+                <ul class="mini-list" id="ovObservers"></ul>
+              </section>
+
+              <section class="card" aria-labelledby="ov-services-title">
+                <div class="card-head">
+                  <h2 id="ov-services-title">Systems</h2>
+                </div>
+                <ul class="mini-list" id="ovServices"></ul>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========================== PAYMENT LINKS ========================== -->
+        <section class="view" data-view-panel="links" aria-labelledby="links-title" hidden>
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Collect</p>
+              <h1 id="links-title">Payment Links</h1>
+              <p class="muted">Create a link, share it, get paid straight into your VPA.</p>
+            </div>
+          </div>
+
+          <div class="grid-link">
+            <section class="card card--form" aria-labelledby="create-title">
+              <div class="card-head">
+                <h2 id="create-title">New payment request</h2>
+                <span class="range-hint">₹1 – ₹100</span>
+              </div>
+
+              <form id="linkForm" novalidate>
+                <div class="field">
+                  <label for="amount">Amount</label>
+                  <div class="amount-input">
+                    <span class="amount-prefix" aria-hidden="true">₹</span>
+                    <input id="amount" name="amount" type="text" inputmode="decimal" autocomplete="off"
+                           placeholder="10.00" aria-describedby="amount-hint" required>
+                  </div>
+                  <p class="hint" id="amount-hint">Minimum ₹1.00 · maximum ₹100.00 · up to 2 decimals</p>
+                </div>
+
+                <div class="chips" role="group" aria-label="Quick amounts">
+                  <button type="button" class="chip" data-amount="1">₹1</button>
+                  <button type="button" class="chip" data-amount="10">₹10</button>
+                  <button type="button" class="chip" data-amount="50">₹50</button>
+                  <button type="button" class="chip" data-amount="100">₹100</button>
+                </div>
+
+                <div class="field">
+                  <label for="note">Note <span class="optional">(optional)</span></label>
+                  <input id="note" name="note" type="text" maxlength="120" autocomplete="off"
+                         placeholder="What is this payment for?">
+                </div>
+
+                <p id="linkError" class="form-error" role="alert" hidden></p>
+
+                <button id="generateBtn" class="primary-btn primary-btn--full" type="submit">
+                  <span class="btn-label">Generate payment link</span>
+                  <span class="spinner" aria-hidden="true" hidden></span>
+                </button>
+              </form>
+            </section>
+
+            <section class="card result-card" id="linkResult" aria-live="polite" hidden>
+              <div class="result-head">
+                <div>
+                  <p class="eyebrow">Ready to share</p>
+                  <p class="result-amount" id="resultAmount">₹0.00</p>
+                  <p class="result-order" id="resultOrderId"></p>
+                </div>
+                <span class="status-pill" id="resultStatus" data-phase="AWAITING_PAYMENT">
+                  <span class="dot" aria-hidden="true"></span>
+                  <span class="status-text">Awaiting payment</span>
+                </span>
+              </div>
+
+              <div class="result-body">
+                <div class="result-qr">
+                  <img id="resultQr" alt="UPI QR code for this payment" width="180" height="180">
+                  <p class="qr-caption" id="resultVpa">Scan with any UPI app</p>
+                </div>
+
+                <div class="result-share">
+                  <label for="resultLink">Checkout link</label>
+                  <input id="resultLink" type="text" readonly spellcheck="false">
+                  <div class="btn-row">
+                    <button id="copyBtn" class="secondary-btn" type="button">Copy link</button>
+                    <button id="shareBtn" class="secondary-btn" type="button">Share</button>
+                    <button id="openBtn" class="secondary-btn" type="button">Open</button>
+                  </div>
+                  <p class="hint" id="resultExpiry"></p>
+                </div>
+              </div>
+
+              <p class="result-hint" id="resultPhaseHint">
+                Waiting for the bank notification. Success is only shown after independent bank confirmation.
+              </p>
+              <p id="resultError" class="form-error" role="alert" hidden></p>
+
+              <button id="newLinkBtn" class="link-btn" type="button">Create another link</button>
+            </section>
+
+            <section class="card card--steps" id="linkSteps" aria-labelledby="steps-title">
+              <h2 id="steps-title">How a link works</h2>
+              <ol class="steps">
+                <li><strong>Generate</strong><span>A ₹1–₹100 request is created on your active receiving VPA.</span></li>
+                <li><strong>Share</strong><span>Your friend scans the QR or opens the link in any UPI app.</span></li>
+                <li><strong>Confirm</strong><span>The observer reports the credit; success waits for the bank.</span></li>
+              </ol>
+            </section>
+          </div>
+        </section>
+
+        <!-- =========================== TRANSACTIONS =========================== -->
+        <section class="view" data-view-panel="transactions" aria-labelledby="tx-title" hidden>
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Ledger</p>
+              <h1 id="tx-title">Transactions</h1>
+              <p class="muted" id="txSubtitle">Most recent payment sessions.</p>
+            </div>
+            <button id="txRefresh" class="ghost-btn" type="button">Refresh</button>
+          </div>
+
+          <div id="txError" class="banner banner--error" role="alert" hidden>
+            <span class="banner-text"></span>
+            <button type="button" class="ghost-btn" data-retry="transactions">Retry</button>
+          </div>
+
+          <section class="card card--list" aria-labelledby="tx-list-title">
+            <div class="card-head">
+              <h2 id="tx-list-title">Recent payments</h2>
+              <span class="count-chip" id="txCount">—</span>
+            </div>
+            <ul class="tx-list" id="txList" aria-live="polite"></ul>
+            <p class="empty" id="txEmpty" hidden>
+              No transactions yet.
+              <button type="button" class="link-btn" data-goto="links">Create a payment link</button>
+            </p>
+          </section>
+        </section>
+
+        <!-- ============================ OBSERVERS ============================ -->
+        <section class="view" data-view-panel="observers" aria-labelledby="obs-title" hidden>
+          <div class="view-head">
+            <div>
+              <p class="eyebrow">Evidence</p>
+              <h1 id="obs-title">Observers</h1>
+              <p class="muted">Devices that report bank credits to the verification engine.</p>
+            </div>
+            <button id="obsRefresh" class="ghost-btn" type="button">Refresh</button>
+          </div>
+
+          <div id="obsError" class="banner banner--error" role="alert" hidden>
+            <span class="banner-text"></span>
+            <button type="button" class="ghost-btn" data-retry="observers">Retry</button>
+          </div>
+
+          <div class="grid-2">
+            <section class="card" aria-labelledby="obs-android-title">
+              <div class="card-head">
+                <h2 id="obs-android-title">Android SMS observer</h2>
+                <span class="count-chip" id="obsSummary">—</span>
+              </div>
+              <ul class="observer-list" id="obsList"></ul>
+              <p class="empty" id="obsEmpty" hidden>
+                No Android device paired. Pair one from the internal operator console on the
+                server (over an SSH tunnel) — that console is intentionally not public.
+              </p>
+            </section>
+
+            <section class="card" aria-labelledby="obs-other-title">
+              <div class="card-head">
+                <h2 id="obs-other-title">Other channels</h2>
+              </div>
+              <ul class="mini-list" id="obsOther"></ul>
+              <p class="hint">
+                Gmail and browser observers are optional. The Android observer is the primary
+                evidence source for UPI credits.
+              </p>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <noscript>
+    <p class="noscript-note">JavaScript is required for the OpenUPI admin.</p>
+  </noscript>
+</body>
+</html>

@@ -4,8 +4,11 @@
 #   pay.<domain>      -> 127.0.0.1:7000  checkout portal + /youpi.js + /api proxy
 #   pay-api.<domain>  -> 127.0.0.1:6100  signed Android observer ingest + merchant API
 #
-# Admin (127.0.0.1:6001) is for SSH tunneling only. There is no control-center,
-# Gmail, SMS browser-automation, demo store, or WhatsApp runtime here.
+# OpenUPI admin (127.0.0.1:6200) is published through the host Nginx vhost
+# https://admin.169.58.29.37.sslip.io with server-side session auth.
+# The legacy merchant admin (127.0.0.1:6001) stays internal (SSH tunnel only).
+# There is no control-center, Gmail, SMS browser-automation, demo store, or
+# WhatsApp runtime here.
 name: youpi-staging
 
 services:
@@ -84,8 +87,55 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  # Private operator console (pairing QR, receiving VPA, devices). Never publish
-  # this through Nginx; reach it with an SSH tunnel.
+  # OpenUPI admin — the daily-use portal (payment links, transactions, observer
+  # health). Only the host Nginx vhost proxies this loopback port; the app itself
+  # enforces sessions, CSRF and origin checks. Keys stay in this container.
+  openupi-admin:
+    image: youpi-pg:staging
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "apps/openupi-admin/src/index.js"]
+    env_file:
+      - .env.staging
+    environment:
+      NODE_ENV: production
+      OPENUPI_ADMIN_PORT: 6200
+      OPENUPI_ADMIN_COOKIE_SECURE: "1"
+      OPENUPI_ADMIN_TRUST_PROXY: "1"
+      PAYMENT_API_INTERNAL_URL: http://payment-api:6100
+      OPENUPI_CHECKOUT_INTERNAL_URL: http://checkout-portal:7000
+    ports:
+      - "127.0.0.1:6200:6200"
+    depends_on:
+      payment-api:
+        condition: service_healthy
+      checkout-portal:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6200/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Private legacy operator console (pairing QR, receiving VPA, devices). Never
+  # publish this through Nginx; reach it with an SSH tunnel.
   merchant-admin:
     image: youpi-pg:staging
     build:

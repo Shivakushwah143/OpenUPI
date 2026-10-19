@@ -1,0 +1,143 @@
+# OpenUPI Admin — dedicated HTTPS vhost.
+#
+#   https://admin.169.58.29.37.sslip.io  ->  127.0.0.1:6200 (apps/openupi-admin)
+#
+# This file is independent of the existing pay / pay-api vhosts. Installing or
+# removing it never touches another VPS application.
+#
+# ---------------------------------------------------------------------------
+# 1. DNS
+#    sslip.io resolves admin.169.58.29.37.sslip.io to 169.58.29.37 automatically.
+#    Confirm before requesting a certificate:
+#      getent hosts admin.169.58.29.37.sslip.io
+#
+# 2. Rate-limit zones (http context)
+#      sudo cp deploy/nginx/openupi-admin-zones.conf.example \
+#              /etc/nginx/conf.d/openupi-admin-zones.conf
+#
+# 3. Install this vhost (HTTP-only first so ACME can complete)
+#      sudo cp deploy/nginx/openupi-admin.conf.example \
+#              /etc/nginx/sites-available/openupi-admin
+#      sudo ln -s /etc/nginx/sites-available/openupi-admin \
+#                 /etc/nginx/sites-enabled/openupi-admin
+#      sudo mkdir -p /var/www/html
+#      sudo nginx -t && sudo systemctl reload nginx
+#
+# 4. Certificate (adds listen 443 ssl + the certificate paths below)
+#      sudo certbot --nginx -d admin.169.58.29.37.sslip.io --redirect
+#      sudo nginx -t && sudo systemctl reload nginx
+#
+# 5. Validate
+#      curl -sS -o /dev/null -w '%{http_code}\n' https://admin.169.58.29.37.sslip.io/          # 200 (sign-in)
+#      curl -sS -o /dev/null -w '%{http_code}\n' https://admin.169.58.29.37.sslip.io/api/overview   # 401
+#      curl -sS -o /dev/null -w '%{http_code}\n' https://admin.169.58.29.37.sslip.io/api/v1/checkout/x/state  # 404
+#
+# 6. Rollback
+#      sudo rm /etc/nginx/sites-enabled/openupi-admin
+#      sudo nginx -t && sudo systemctl reload nginx
+#
+# The admin application enforces its own server-side session (scrypt password +
+# HttpOnly/SameSite=Strict cookie + CSRF token). This vhost adds TLS, HSTS,
+# request throttling and an optional operator IP allowlist on top.
+# ---------------------------------------------------------------------------
+
+upstream openupi_admin {
+    server 127.0.0.1:6200;
+    keepalive 8;
+}
+
+# Plain HTTP exists only to redirect and to answer ACME challenges.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name admin.169.58.29.37.sslip.io;
+
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$host$request_uri; }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name admin.169.58.29.37.sslip.io;
+
+    ssl_certificate     /etc/letsencrypt/live/admin.169.58.29.37.sslip.io/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/admin.169.58.29.37.sslip.io/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:openupi_admin_ssl:10m;
+    ssl_session_timeout 1d;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+
+    server_tokens off;
+
+    # Optional: restrict the admin host to known operator addresses. Keep the
+    # application login enabled regardless — this is defence in depth, not a
+    # replacement for authentication.
+    # allow 203.0.113.10;
+    # allow 2001:db8::/32;
+    # deny all;
+
+    # The admin API only accepts small JSON bodies.
+    client_max_body_size 64k;
+
+    add_header Strict-Transport-Security "max-age=15552000; includeSubDomains" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Robots-Tag "noindex, nofollow, noarchive" always;
+
+    access_log /var/log/nginx/openupi-admin.access.log;
+    error_log  /var/log/nginx/openupi-admin.error.log warn;
+
+    # Liveness probe. Contains no tenant data and does not touch the gateway.
+    location = /health {
+        limit_req zone=openupi_admin burst=10 nodelay;
+        proxy_pass http://openupi_admin;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        access_log off;
+    }
+
+    # Gateway API namespaces are never proxied from this host. The admin app is a
+    # BFF: it calls the payment API server-side with credentials the browser never
+    # sees. Public API routes keep living on the pay / pay-api hosts only.
+    location ^~ /api/v1/ {
+        return 404;
+    }
+
+    # The legacy admin console and debug surfaces are not reachable here.
+    location = /test-console { return 404; }
+    location = /admin        { return 404; }
+    location = /youpi.js     { return 404; }
+
+    # Sign-in throttle at the edge (the app applies its own per-IP throttle too).
+    location = /api/session {
+        limit_req zone=openupi_admin_login burst=5 nodelay;
+        proxy_pass http://openupi_admin;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 20s;
+    }
+
+    location / {
+        limit_req zone=openupi_admin burst=20 nodelay;
+        proxy_pass http://openupi_admin;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header Connection "";
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        proxy_buffering off;
+    }
+}

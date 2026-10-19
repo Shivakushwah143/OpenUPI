@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Sign in · OpenUPI Admin</title>
+  <meta name="description" content="OpenUPI administration: create payment links, track settlement status and observer health.">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="theme-color" content="#0b1020">
+  <link rel="icon" type="image/svg+xml" href="/assets/brand/favicon.svg">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/login.js" defer></script>
+</head>
+<body class="auth-body">
+  <a class="skip-link" href="#signin-form">Skip to sign-in form</a>
+
+  <div class="auth-shell">
+    <section class="auth-brand" aria-label="About OpenUPI">
+      <div class="auth-brand-top">
+        <img class="brand-mark brand-mark--lg" src="/assets/brand/logo.svg" alt="" width="48" height="48">
+        <div class="brand-lockup">
+          <span class="brand-name">OpenUPI</span>
+          <span class="brand-sub">Admin</span>
+        </div>
+      </div>
+
+      <div class="auth-pitch">
+        <h1>Payment links, without the tunnel.</h1>
+        <p>Create a shareable UPI link in seconds and watch the bank confirmation arrive — over HTTPS, from any device.</p>
+        <ul class="auth-points">
+          <li><span class="tick" aria-hidden="true">✓</span> ₹1–₹100 payment links with QR and UPI intent</li>
+          <li><span class="tick" aria-hidden="true">✓</span> Success only after independent bank confirmation</li>
+          <li><span class="tick" aria-hidden="true">✓</span> Admin credentials stay on the server</li>
+        </ul>
+      </div>
+
+      <p class="auth-brand-foot">Self-hosted · No payment aggregator · Your VPA, your bank</p>
+    </section>
+
+    <main class="auth-panel">
+      <div class="auth-card">
+        <img class="brand-mark auth-mobile-mark" src="/assets/brand/logo.svg" alt="" width="40" height="40">
+        <p class="eyebrow">OpenUPI Admin</p>
+        <h2>Sign in</h2>
+        <p class="muted">Authorised operators only.</p>
+
+        <form id="signin-form" class="auth-form" method="post" action="/api/session" novalidate>
+          <div class="field">
+            <label for="username">Username</label>
+            <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+          </div>
+
+          <div class="field">
+            <label for="password">Password</label>
+            <div class="password-row">
+              <input id="password" name="password" type="password" autocomplete="current-password" required>
+              <button id="toggle-password" class="ghost-btn" type="button" aria-pressed="false" aria-controls="password">Show</button>
+            </div>
+          </div>
+
+          <p id="signin-error" class="form-error" role="alert" hidden></p>
+
+          <button id="signin-submit" class="primary-btn primary-btn--full" type="submit">
+            <span class="btn-label">Sign in</span>
+            <span class="spinner" aria-hidden="true" hidden></span>
+          </button>
+        </form>
+
+        <p class="auth-fineprint">
+          The session cookie is HttpOnly and SameSite=Strict. Changing the password on the
+          server ends every existing session.
+        </p>
+      </div>
+
+      <p class="auth-legal">OpenUPI Admin · Unauthorised access is prohibited.</p>
+    </main>
+  </div>
+
+  <noscript>
+    <p class="noscript-note">JavaScript is required to sign in to the OpenUPI admin.</p>
+  </noscript>
+</body>
+</html>

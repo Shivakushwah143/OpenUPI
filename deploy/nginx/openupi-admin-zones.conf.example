@@ -1,0 +1,17 @@
+# OpenUPI Admin — Nginx rate-limit zones (http context).
+#
+# `limit_req_zone` is only valid inside http {}. Install this file into
+# conf.d/ so it is included by the stock nginx.conf before the site configs:
+#
+#   sudo cp deploy/nginx/openupi-admin-zones.conf.example \
+#           /etc/nginx/conf.d/openupi-admin-zones.conf
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Zones are referenced by deploy/nginx/openupi-admin.conf.example.
+
+# Normal admin traffic (pages, JSON reads, link creation).
+limit_req_zone $binary_remote_addr zone=openupi_admin:10m rate=20r/s;
+
+# Sign-in attempts: 10 per minute per address, burst 5. The application also
+# throttles failed logins in-process, so this is a second, independent layer.
+limit_req_zone $binary_remote_addr zone=openupi_admin_login:10m rate=10r/m;
