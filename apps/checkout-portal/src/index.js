@@ -20,5 +20,19 @@ export function startCheckoutServer(port = null, options = {}) {
 
 // Auto-run if executed directly as main script
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  startCheckoutServer();
+  const running = await startCheckoutServer();
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Checkout Portal] ${signal} received; shutting down gracefully...`);
+    const forceExit = setTimeout(() => process.exit(1), 10000);
+    forceExit.unref();
+    try {
+      await running.close();
+    } catch {}
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

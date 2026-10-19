@@ -5,6 +5,7 @@ node_modules/
 
 # Environment and Secrets
 .env
+.env.staging
 .env.local
 .env.development.local
 .env.test.local

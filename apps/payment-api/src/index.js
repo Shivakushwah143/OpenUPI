@@ -689,5 +689,24 @@ export function startServer(port = null, customDb = null) {
 
 // Auto-run if executed directly as main script
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  startServer();
+  const running = await startServer();
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Payment API] ${signal} received; shutting down gracefully...`);
+    // Bound the drain: SSE clients may hold a connection open indefinitely, but a
+    // checkpoint on close still gets its chance. SQLite (WAL) is durable either way.
+    const forceExit = setTimeout(() => process.exit(1), 10000);
+    forceExit.unref();
+    try {
+      await running.close();
+    } catch {}
+    try {
+      running.app.context.db.close();
+    } catch {}
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

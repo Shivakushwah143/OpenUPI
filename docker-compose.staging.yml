@@ -1,0 +1,141 @@
+# YOUPI PG V2 — minimal staging stack for a real Paytm UPI test.
+#
+# Public entrypoints (host Nginx terminates TLS and proxies to these loopback ports):
+#   pay.<domain>      -> 127.0.0.1:7000  checkout portal + /youpi.js + /api proxy
+#   pay-api.<domain>  -> 127.0.0.1:6100  signed Android observer ingest + merchant API
+#
+# Admin (127.0.0.1:6001) is for SSH tunneling only. There is no control-center,
+# Gmail, SMS browser-automation, demo store, or WhatsApp runtime here.
+name: youpi-staging
+
+services:
+  payment-api:
+    image: youpi-pg:staging
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "apps/payment-api/src/index.js"]
+    env_file:
+      - .env.staging
+    environment:
+      NODE_ENV: production
+      SQLITE_DB_PATH: /data/youpi.sqlite
+    ports:
+      - "127.0.0.1:6100:6100"
+    volumes:
+      - youpi-data:/data
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  checkout-portal:
+    image: youpi-pg:staging
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "apps/checkout-portal/src/index.js"]
+    env_file:
+      - .env.staging
+    environment:
+      NODE_ENV: production
+      PAYMENT_API_INTERNAL_URL: http://payment-api:6100
+    ports:
+      - "127.0.0.1:7000:7000"
+    depends_on:
+      payment-api:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Private operator console (pairing QR, receiving VPA, devices). Never publish
+  # this through Nginx; reach it with an SSH tunnel.
+  merchant-admin:
+    image: youpi-pg:staging
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["node", "apps/merchant-admin/src/index.js"]
+    env_file:
+      - .env.staging
+    environment:
+      NODE_ENV: production
+      SQLITE_DB_PATH: /data/youpi.sqlite
+      PAYMENT_API_INTERNAL_URL: http://payment-api:6100
+      # Trust only the host-side compose gateway (Nginx/SSH-tunnel entrypoint) when
+      # attaching the merchant key to the pairing proxy. Matches the fixed subnet below.
+      MERCHANT_ADMIN_TRUSTED_PROXIES: 172.30.77.1
+    ports:
+      - "127.0.0.1:6001:6001"
+    volumes:
+      - youpi-data:/data
+    depends_on:
+      payment-api:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:6001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  youpi-data:
+
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.77.0/24
