@@ -549,12 +549,16 @@ export class PaymentVerificationPipeline {
     // =========================================================================
     let stage4;
 
-    if (!session && parsedData?.amountPaise) {
+    if (!session && parsedData?.amountPaise && input.receivingAccountId) {
+      // Amount matching is ALWAYS scoped to the receiving account the observation
+      // was ingested for. There is deliberately no gateway-wide same-amount
+      // fallback: a credit on one merchant's account can never pay another
+      // merchant's order (audit P0-09 / P1-03).
       const matchRow = this.db.queryOne(`
         SELECT * FROM payment_sessions
-        WHERE status IN ('ACTIVE', 'PROCESSING') AND amount_paise = ?
+        WHERE receiving_account_id = ? AND status IN ('ACTIVE', 'PROCESSING') AND amount_paise = ?
         ORDER BY created_at DESC LIMIT 1
-      `, [Number(parsedData.amountPaise)]);
+      `, [input.receivingAccountId, Number(parsedData.amountPaise)]);
       if (matchRow) {
         session = this.sessionRepo.mapRow(matchRow);
       }
@@ -1075,6 +1079,30 @@ export class PaymentVerificationPipeline {
         };
 
     if (trace) trace.mark('attribution');
+
+    // Persist the observation → matched → persisted timing evidence for this
+    // observation. This is pure telemetry: it can never change a decision, and a
+    // failure to write it must never fail intake.
+    if (trace && attributionResult?.observationId) {
+      try {
+        const snapshot = trace.snapshot();
+        this.db.execute(`
+          INSERT OR REPLACE INTO payment_observation_latency (
+            observation_id, payment_id, receiving_account_id, received_at,
+            matched_ms, persisted_ms, ingest_total_ms, segments_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          attributionResult.observationId,
+          attributionResult.paymentSessionId || null,
+          session?.receivingAccountId || receivingAccountId || null,
+          new Date(trace.startedAt).toISOString(),
+          snapshot.segments?.match ?? snapshot.totalMs,
+          snapshot.totalMs,
+          snapshot.totalMs,
+          JSON.stringify(snapshot.segments || {})
+        ]);
+      } catch { /* telemetry only */ }
+    }
 
     stage6 = {
       stage: 6,

@@ -218,6 +218,23 @@ CREATE TABLE IF NOT EXISTS payment_observations (
 
 CREATE INDEX IF NOT EXISTS idx_observations_match ON payment_observations (receiving_account_id, amount_paise, attribution_status);
 
+-- 5b. Observation → verification latency samples (staging console evidence).
+-- One row per pipeline-processed observation. Timings are server-side ms relative
+-- to the request start (observation received). No payment decision depends on it.
+CREATE TABLE IF NOT EXISTS payment_observation_latency (
+    observation_id TEXT PRIMARY KEY,
+    payment_id TEXT,
+    receiving_account_id TEXT,
+    received_at TEXT NOT NULL,
+    matched_ms REAL,
+    persisted_ms REAL,
+    ingest_total_ms REAL,
+    segments_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_observation_latency_payment
+    ON payment_observation_latency (payment_id, received_at);
+
 -- 6. Android Devices Table
 CREATE TABLE IF NOT EXISTS android_devices (
     id TEXT PRIMARY KEY,

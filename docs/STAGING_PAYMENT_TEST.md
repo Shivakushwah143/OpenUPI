@@ -196,6 +196,68 @@ Open `checkoutUrl` in a browser:
 
 ---
 
+## 6a. Staging Payment Test Console (no OTP, no merchant credentials)
+
+The private merchant-admin app now ships an opt-in test console that creates a
+real `PENDING`/`ACTIVE` payment through the same merchant/payment API and returns a
+scoped, unguessable guest checkout link. It is **disabled by default** and is never
+proxied by Nginx.
+
+Enable it only on staging, in `.env.staging`:
+
+```dotenv
+YOUPI_TEST_CONSOLE_ENABLED=1
+YOUPI_TEST_CONSOLE_TOKEN=<at least 24 random chars, NOT the merchant key>
+BASE_CHECKOUT_URL=https://pay.169.58.29.37.sslip.io
+```
+
+Generate the token with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`,
+then recreate the admin container:
+
+```bash
+docker compose -f docker-compose.staging.yml --env-file .env.staging up -d --force-recreate merchant-admin
+ssh -N -L 6001:127.0.0.1:6001 <user>@<vps>
+```
+
+Open `http://127.0.0.1:6001/test-console`, unlock with `YOUPI_TEST_CONSOLE_TOKEN`,
+enter an amount between ₹1 and ₹100 (default ₹10) and press **Generate Payment Link**.
+
+- The merchant API key is attached server-side only; it never reaches the browser.
+- The link is `https://pay.169.58.29.37.sslip.io/checkout/<id>?t=<scoped-token>`.
+- Share it with the friend. No merchant login and no WhatsApp OTP are required for
+  that session, because it is explicitly marked `metadata.guestCheckout`.
+- The console shows `AWAITING_PAYMENT` → `PAYMENT_DETECTED` when the signed Android
+  SMS observation is attributed, and `SUCCESS` only after bank confirmation.
+- It also shows observation → matched → persisted → visible timings. These come from
+  `payment_observation_latency` and are telemetry only.
+
+Nginx coverage for the generated link (already present in the staging template):
+
+| Generated route | Nginx location |
+| :--- | :--- |
+| `/checkout/<id>?t=…` | `location ^~ /checkout/` on `pay.<domain>` |
+| `/checkout/<id>/qr.svg?t=…` | same `/checkout/` block |
+| `/api/v1/checkout/<id>/state?t=…` | `location ^~ /api/` on `pay.<domain>` |
+| `/api/v1/checkout/<id>/stream?t=…` (SSE) | same `/api/` block, `proxy_buffering off` |
+
+The console page itself is served from `merchant-admin:6001` over the SSH tunnel.
+There is no public route for it, and `/api/v1/admin/*`, `/api/v1/pollers/*` and
+`/api/v1/observers/*` remain `404` on the public checkout host.
+
+Run the complete synthetic flow (console create → guest checkout → signed Android
+SMS → `PAYMENT_DETECTED` → authoritative bank confirmation) against a temporary
+real SQLite database, including latency percentiles:
+
+```bash
+node scripts/test-console-e2e.mjs --iterations=20
+```
+
+The script asserts that SMS alone never reaches `SUCCESS`, that one bank reference
+is reserved exactly once, and prints p50/p95/p99 for observation → ingest, console
+SSE event and console-visible status.
+
+---
+
 ## 7. Observe and confirm
 
 Watch the API and observer logs:
@@ -222,8 +284,9 @@ Expected progression:
 | Stage | Status | Meaning |
 | :--- | :--- | :--- |
 | QR displayed | `ACTIVE` | slot held, timer running |
-| notification received | `ACTIVE`/`PROCESSING`, possibly `verificationLevel` / `paymentDetected` | observation evidence only |
-| verification engine settles | `SUCCESS` | matching observation(s) accepted by the state machine |
+| notification received | `ACTIVE`/`PROCESSING`, `paymentDetected: true` | observation evidence only (`PAYMENT_DETECTED`) |
+| authoritative bank/acquirer confirmation | `SUCCESS` + `BANK_CONFIRMED` | the only settlement path |
+| one SMS/email alone | stays `ACTIVE`/`REPORTED` | never settlement; waits for bank evidence or manual review |
 | mismatch / late credit | `FAILED` or reconciliation case | not settled; review evidence |
 
 `SUCCESS` in the browser/checkout is **not** proof for fulfilment. Confirm
@@ -305,8 +368,11 @@ Never run `down -v` unless you explicitly intend to delete the SQLite volume.
 
 ## 10. Known staging constraints
 
-- **OTP delivery**: WhatsApp/Berry is disabled, so the customer sign-in OTP is read
-  from the server log (existing behavior). Do not expose those logs publicly.
+- **OTP delivery**: WhatsApp/Berry is disabled. Use the test console (§6a) for a
+  scoped guest link; the older manual flow reads the customer sign-in OTP from the
+  server log. Do not expose those logs publicly.
+- **Test console**: opt-in via `YOUPI_TEST_CONSOLE_ENABLED`; keep it off in
+  production and never proxy port 6001.
 - **Gmail/browser observers**: not started. Verification relies on the signed
   Android observer (and any other enabled observer you add later).
 - **Admin**: not proxied by Nginx. Use the SSH tunnel.

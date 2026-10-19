@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HttpServer } from '../server.js';
 import { ObservationNormalizer, BankSmsParser, BankEmailParser, generateQrSvg } from '@youpi/core';
-import { toRupeesString, toPaise, resolveRuntimeUrls, ObserverSource } from '@youpi/common';
+import { toRupeesString, toPaise, resolveRuntimeUrls, ObserverSource, ObservationAttributionStatus } from '@youpi/common';
 import { issuePairingToken, redeemPairingToken, revokeOutstandingPairingTokens } from '../services/api-auth.js';
 import { sealSecret, hashSecret } from '@youpi/common';
 
@@ -138,6 +138,24 @@ export function registerPollerRoutes(server, ctx) {
           threatDetected: true,
           banned: true,
           error: 'FRAUDULENT_PAYMENT_INJECTION: Positive identification of fake payment message. Customer account banned and session terminated.'
+        });
+        return;
+      }
+
+      // Integrity rejections must never fall through to the legacy normalization
+      // path, which would persist the same bank credit a second time under a
+      // different observer-source enum (duplicate attribution / double credit).
+      if (pipeResult.status === 'REJECTED' && ['DUPLICATE_OBSERVATION', 'REFERENCE_ALREADY_USED'].includes(pipeResult.failingCondition)) {
+        HttpServer.json(res, 200, {
+          accepted: true,
+          duplicate: true,
+          status: ObservationAttributionStatus.DUPLICATE_IGNORED,
+          attribution: {
+            attributed: false,
+            duplicate: true,
+            outcomeStatus: ObservationAttributionStatus.DUPLICATE_IGNORED,
+            reason: pipeResult.failingCondition
+          }
         });
         return;
       }
@@ -399,6 +417,24 @@ export function registerPollerRoutes(server, ctx) {
           threatDetected: true,
           banned: true,
           error: 'FRAUDULENT_PAYMENT_INJECTION: Fake SMS detected. Associated customer identity banned and session terminated.'
+        });
+        return;
+      }
+
+      // Same integrity guard as the universal poller: a duplicate bank credit
+      // must not be re-persisted by the legacy fallback path.
+      if (pipeResult.status === 'REJECTED' && ['DUPLICATE_OBSERVATION', 'REFERENCE_ALREADY_USED'].includes(pipeResult.failingCondition)) {
+        ctx.db.execute("UPDATE android_devices SET last_observation_at = datetime('now') WHERE id = ?", [deviceId]);
+        HttpServer.json(res, 200, {
+          accepted: true,
+          duplicate: true,
+          status: ObservationAttributionStatus.DUPLICATE_IGNORED,
+          attribution: {
+            attributed: false,
+            duplicate: true,
+            outcomeStatus: ObservationAttributionStatus.DUPLICATE_IGNORED,
+            reason: pipeResult.failingCondition
+          }
         });
         return;
       }

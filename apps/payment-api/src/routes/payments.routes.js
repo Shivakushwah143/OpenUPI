@@ -1,5 +1,5 @@
 import { HttpServer } from '../server.js';
-import { toPaise, toRupeesString, resolveRuntimeUrls, PaymentStatus } from '@youpi/common';
+import { toPaise, toRupeesString, resolveRuntimeUrls, PaymentStatus, ConfirmationStatus } from '@youpi/common';
 import { isTerminalStatus, toPublicOutcome } from '@youpi/core';
 import { requireCheckoutAccess } from '../services/api-auth.js';
 
@@ -308,6 +308,9 @@ export function registerPaymentRoutes(server, ctx) {
       currency: session.currency,
       status: publicStatus,
       internalStatus: session.status,
+      confirmationStatus: session.confirmationStatus,
+      paymentDetected: session.confirmationStatus === ConfirmationStatus.REPORTED,
+      guestCheckout: session.metadata?.guestCheckout === true && session.metadata?.testConsole === true,
       method: session.method,
       verificationLevel: session.verificationLevel || 0,
       verificationSources: session.verificationSources || [],
@@ -315,6 +318,45 @@ export function registerPaymentRoutes(server, ctx) {
       completedAt: session.completedAt ? session.completedAt.toISOString() : null,
       returnUrl: session.returnUrl,
       metadata: session.metadata
+    });
+  });
+
+  // GET /api/v1/payments/:id/latency
+  // Observation → matched → persisted telemetry for the authenticated session.
+  // Read-only evidence; no payment decision depends on these values.
+  server.get('/api/v1/payments/:id/latency', async (req, res, params) => {
+    const session = ctx.sessionRepo.findById(params.id);
+    if (!session) {
+      HttpServer.json(res, 404, { error: `Payment session not found: ${params.id}` });
+      return;
+    }
+
+    if (!requireCheckoutAccess(req, res, ctx, session)) return;
+
+    let samples = [];
+    try {
+      samples = ctx.db.query(`
+        SELECT observation_id, received_at, matched_ms, persisted_ms, ingest_total_ms
+        FROM payment_observation_latency
+        WHERE payment_id = ?
+        ORDER BY received_at DESC
+        LIMIT 10
+      `, [session.id]).map(row => ({
+        observationId: row.observation_id,
+        receivedAt: row.received_at,
+        matchedMs: row.matched_ms,
+        persistedMs: row.persisted_ms,
+        ingestTotalMs: row.ingest_total_ms
+      }));
+    } catch { /* telemetry table absent: return an empty sample set */ }
+
+    HttpServer.json(res, 200, {
+      paymentId: session.id,
+      status: session.status,
+      confirmationStatus: session.confirmationStatus,
+      paymentDetected: session.confirmationStatus === ConfirmationStatus.REPORTED,
+      serverNow: new Date().toISOString(),
+      samples
     });
   });
 

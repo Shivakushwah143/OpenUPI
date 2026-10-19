@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDatabase, MerchantRepository, SupportTicketRepository } from '@youpi/db';
+import { TestConsole, readTestConsoleConfig } from './test-console.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -118,12 +119,20 @@ export class AdminServer {
     // Internal container-to-container target; falls back to the historical loopback.
     const internalBase = (options.apiInternalUrl || process.env.PAYMENT_API_INTERNAL_URL || `http://127.0.0.1:${process.env.PAYMENT_API_PORT || 6100}`).replace(/\/+$/, '');
     const parsedInternal = new URL(internalBase);
+    this.apiInternalBaseUrl = internalBase;
     this.apiTarget = {
       hostname: parsedInternal.hostname,
       port: Number(parsedInternal.port || (parsedInternal.protocol === 'https:' ? 443 : 80))
     };
     this.merchantRepo = new MerchantRepository(this.db);
     this.ticketRepo = new SupportTicketRepository(this.db);
+    this.testConsole = new TestConsole({
+      db: this.db,
+      merchantRepo: this.merchantRepo,
+      apiTarget: this.apiTarget,
+      apiInternalBaseUrl: this.apiInternalBaseUrl,
+      config: readTestConsoleConfig(options.env || process.env)
+    });
     this.htmlTemplatePath = path.join(__dirname, 'views', 'admin.html');
     this.template = fs.readFileSync(this.htmlTemplatePath, 'utf8');
   }
@@ -141,6 +150,9 @@ export class AdminServer {
     // The legacy static enrollment secret is no longer accepted by the gateway
     // (pairing uses single-use challenges), so it is never rendered into HTML.
     html = html.replaceAll('{{ANDROID_ENROLLMENT_SECRET}}', '');
+    // Staging-only test console entry. The placeholder renders to an empty string
+    // unless the operator explicitly enabled the console.
+    html = html.replaceAll('{{TEST_CONSOLE_NAV}}', this.testConsole.navHtml());
     return html;
   }
 
@@ -163,6 +175,25 @@ export class AdminServer {
       if (pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'UP', service: 'merchant-admin' }));
+        return;
+      }
+
+      // Staging-only Payment Test Console (opt-in; disabled by default). It is
+      // handled before the generic /api/ proxy so no console route can ever be
+      // forwarded to the gateway without the console's own session check.
+      if (pathname === '/test-console' || pathname.startsWith('/api/test-console/')) {
+        try {
+          const handled = await this.testConsole.handle(req, res, pathname);
+          if (handled) return;
+        } catch (err) {
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'TEST_CONSOLE_UNAVAILABLE', details: err.message }));
+          }
+          return;
+        }
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Test Console Disabled');
         return;
       }
 

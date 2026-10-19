@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Payment Test Console — YOUPI PG Staging</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --primary-light: rgba(37, 99, 235, 0.08);
+      --success: #059669;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --info: #0284c7;
+      --shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px -1px rgba(0, 0, 0, 0.04);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 20px 16px 56px;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 800;
+      font-size: 0.98rem;
+    }
+
+    .brand-badge {
+      font-size: 0.66rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #92400e;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 999px;
+      padding: 3px 8px;
+    }
+
+    .link-btn {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--muted);
+      font-weight: 700;
+      font-size: 0.78rem;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      text-decoration: none;
+    }
+
+    .link-btn:hover { color: var(--text); }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    h1 {
+      font-size: 1.22rem;
+      line-height: 1.3;
+      margin: 0 0 6px;
+    }
+
+    h2 {
+      font-size: 0.98rem;
+      margin: 0 0 12px;
+    }
+
+    p.sub {
+      margin: 0 0 18px;
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    label {
+      display: block;
+      font-weight: 700;
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+
+    input[type="password"],
+    input[type="number"] {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 13px 14px;
+      font-size: 1rem;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+    }
+
+    .amount-row {
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .amount-row input { flex: 1; font-weight: 800; font-size: 1.15rem; }
+
+    .btn {
+      border: none;
+      border-radius: 10px;
+      background: var(--primary);
+      color: #ffffff;
+      font-weight: 800;
+      font-size: 0.88rem;
+      padding: 13px 18px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, opacity 0.15s;
+    }
+
+    .btn:hover { background: var(--primary-hover); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    .btn.secondary {
+      background: var(--card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn.secondary:hover { background: #f1f5f9; }
+
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    .hint {
+      color: var(--muted);
+      font-size: 0.76rem;
+      margin-top: 8px;
+      line-height: 1.45;
+    }
+
+    .notice {
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      border: 1px solid #fde68a;
+      background: #fffbeb;
+      color: #92400e;
+      margin-top: 14px;
+    }
+
+    .error {
+      border: 1px solid #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+      border-radius: 10px;
+      padding: 12px 14px;
+      font-size: 0.82rem;
+      line-height: 1.5;
+      margin-top: 14px;
+    }
+
+    .hidden { display: none !important; }
+
+    .status-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+
+    .badge .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .badge.awaiting { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+    .badge.detected { color: #1e40af; background: #eff6ff; border-color: #bfdbfe; }
+    .badge.success { color: #065f46; background: #ecfdf5; border-color: #a7f3d0; }
+    .badge.failed { color: #991b1b; background: #fef2f2; border-color: #fecaca; }
+    .badge.queued { color: #5b21b6; background: #f5f3ff; border-color: #ddd6fe; }
+
+    .amount-big {
+      font-size: 1.9rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin: 0;
+    }
+
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin: 16px 0 4px;
+    }
+
+    @media (min-width: 560px) {
+      .meta-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    .meta {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #ffffff;
+      min-width: 0;
+    }
+
+    .meta .k {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      font-weight: 800;
+      margin-bottom: 4px;
+    }
+
+    .meta .v {
+      font-size: 0.82rem;
+      font-weight: 700;
+      word-break: break-all;
+      line-height: 1.35;
+    }
+
+    .link-box {
+      display: flex;
+      gap: 8px;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+
+    .link-box input {
+      flex: 1 1 240px;
+      min-width: 0;
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      background: #f8fafc;
+      color: var(--text);
+      font-size: 0.78rem;
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .timeline {
+      display: flex;
+      align-items: center;
+      gap: 0;
+      margin: 16px 0 4px;
+    }
+
+    .step {
+      flex: 1;
+      text-align: center;
+      position: relative;
+      min-width: 0;
+    }
+
+    .step .node {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: 2px solid var(--border);
+      background: var(--card);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 6px;
+      font-size: 0.62rem;
+      font-weight: 800;
+      color: var(--muted);
+      position: relative;
+      z-index: 1;
+    }
+
+    .step .name {
+      font-size: 0.64rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .step::before {
+      content: "";
+      position: absolute;
+      top: 10px;
+      left: 0;
+      right: 50%;
+      height: 2px;
+      background: var(--border);
+    }
+
+    .step:first-child::before { display: none; }
+
+    .step.done .node,
+    .step.active .node {
+      border-color: var(--primary);
+      background: var(--primary);
+      color: #ffffff;
+    }
+
+    .step.done .name,
+    .step.active .name { color: var(--text); }
+
+    .step.done::before,
+    .step.active::before { background: var(--primary); }
+
+    .latency {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    @media (min-width: 560px) {
+      .latency { grid-template-columns: repeat(4, 1fr); }
+    }
+
+    .lat {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 9px 10px;
+      background: #ffffff;
+    }
+
+    .lat .k {
+      font-size: 0.62rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    .lat .v {
+      font-size: 0.95rem;
+      font-weight: 800;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .conn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.68rem;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+    }
+
+    .conn .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+
+    .conn.live .dot { background: var(--success); }
+    .conn.polling .dot { background: var(--warning); }
+
+    .footer-note {
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.5;
+      text-align: center;
+      margin-top: 18px;
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.92em;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <span>🛡️</span>
+        <span>YOUPI PG</span>
+        <span class="brand-badge">Staging Test</span>
+      </div>
+      <a class="link-btn" href="/">← Merchant Admin</a>
+    </div>
+
+    <!-- LOGIN -->
+    <section class="card" id="loginView">
+      <h1>Payment Test Console</h1>
+      <p class="sub">
+        Staging-only console for generating a real test payment link and watching the
+        bank-observation pipeline. It uses the existing merchant/payment API and the
+        signed Android observer path — no real money is moved by this page.
+      </p>
+      <form id="loginForm" autocomplete="off">
+        <label for="consoleToken">Console access token</label>
+        <input id="consoleToken" type="password" inputmode="text" autocomplete="current-password"
+          placeholder="YOUPI_TEST_CONSOLE_TOKEN" required />
+        <div class="btn-row" style="margin-top: 12px;">
+          <button class="btn" type="submit" id="loginBtn">Unlock Console</button>
+        </div>
+      </form>
+      <div class="error hidden" id="loginError" role="alert"></div>
+      <div class="hint">
+        This token is configured on the server only. It is never the merchant API key and
+        is stored in an HttpOnly, SameSite=Strict session cookie after login.
+      </div>
+    </section>
+
+    <!-- CONSOLE -->
+    <section id="consoleView" class="hidden">
+      <div class="card">
+        <div class="status-head" style="margin-bottom: 6px;">
+          <div>
+            <h1 style="margin-bottom: 2px;">Generate Payment Link</h1>
+            <p class="sub" style="margin-bottom: 0;" id="merchantLine">Merchant</p>
+          </div>
+          <span class="conn" id="connState"><span class="dot"></span><span id="connText">Idle</span></span>
+        </div>
+
+        <form id="generateForm" style="margin-top: 16px;">
+          <label for="amountInput">Amount (₹1 – ₹100)</label>
+          <div class="amount-row">
+            <input id="amountInput" type="number" min="1" max="100" step="0.01" value="10" required />
+            <button class="btn" type="submit" id="generateBtn">Generate Payment Link</button>
+          </div>
+        </form>
+        <div class="hint">
+          Default ₹10. The link is a scoped, unguessable guest checkout URL — your friend
+          can open it without merchant credentials or the WhatsApp OTP step.
+        </div>
+        <div class="error hidden" id="generateError" role="alert"></div>
+      </div>
+
+      <div class="card hidden" id="paymentCard">
+        <div class="status-head">
+          <span class="badge awaiting" id="statusBadge"><span class="dot"></span><span id="statusText">AWAITING_PAYMENT</span></span>
+          <span class="conn" id="liveConn"><span class="dot"></span><span id="liveConnText">Connecting…</span></span>
+        </div>
+
+        <p class="amount-big" id="amountBig">₹0.00</p>
+        <p class="sub" style="margin: 4px 0 0;" id="orderLine">Order</p>
+
+        <div class="link-box">
+          <input id="checkoutLink" type="text" readonly aria-label="Checkout link" />
+          <button class="btn secondary" type="button" id="copyBtn">Copy Link</button>
+          <a class="btn secondary" id="openLink" href="#" target="_blank" rel="noopener noreferrer"
+            style="text-decoration:none; display:inline-flex; align-items:center;">Open</a>
+        </div>
+
+        <div class="timeline" aria-label="Payment progress">
+          <div class="step active" id="stepAwaiting">
+            <div class="node">1</div>
+            <div class="name">Awaiting</div>
+          </div>
+          <div class="step" id="stepDetected">
+            <div class="node">2</div>
+            <div class="name">Detected</div>
+          </div>
+          <div class="step" id="stepConfirmed">
+            <div class="node">3</div>
+            <div class="name">Confirmed</div>
+          </div>
+        </div>
+
+        <div class="meta-grid">
+          <div class="meta">
+            <div class="k">Receiving VPA</div>
+            <div class="v" id="payeeVpa">—</div>
+          </div>
+          <div class="meta">
+            <div class="k">Payment ID</div>
+            <div class="v" id="paymentId">—</div>
+          </div>
+        </div>
+
+        <div class="notice hidden" id="evidenceNotice">
+          A matching bank SMS observation was detected. SMS is <strong>evidence only</strong> —
+          the payment stays unconfirmed until independent bank evidence is recorded.
+        </div>
+
+        <div class="latency" id="latencyGrid">
+          <div class="lat"><div class="k">Received → Matched</div><div class="v" id="latMatched">—</div></div>
+          <div class="lat"><div class="k">Matched → Persisted</div><div class="v" id="latPersisted">—</div></div>
+          <div class="lat"><div class="k">Persisted → Visible</div><div class="v" id="latVisible">—</div></div>
+          <div class="lat"><div class="k">End to End</div><div class="v" id="latTotal">—</div></div>
+        </div>
+
+        <div class="error hidden" id="statusError" role="alert"></div>
+        <div class="hint" id="updatedLine">Waiting for the first status update…</div>
+      </div>
+
+      <p class="footer-note">
+        Test-only staging surface. SUCCESS is written solely by the internal verification
+        engine after authoritative bank confirmation — this console cannot force it.
+      </p>
+    </section>
+  </div>
+
+  <script>
+    (() => {
+      'use strict';
+
+      const $ = id => document.getElementById(id);
+      let currentPaymentId = null;
+      let currentCheckoutUrl = '';
+      // Freeze the first detected-visible latency so later polls (which increase
+      // the server's "time since received") do not inflate the reported figure.
+      let detectedVisibleMs = null;
+      let pollTimer = null;
+      let eventSource = null;
+      let refreshInFlight = false;
+      let reconnectTimer = null;
+
+      const phaseClass = phase => {
+        switch (phase) {
+          case 'SUCCESS': return 'success';
+          case 'PAYMENT_DETECTED': return 'detected';
+          case 'QUEUED': return 'queued';
+          case 'FAILED':
+          case 'EXPIRED':
+          case 'CANCELLED':
+          case 'BLOCKED': return 'failed';
+          default: return 'awaiting';
+        }
+      };
+
+      const fmtMs = value => {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return '—';
+        return `${Math.round(n)} ms`;
+      };
+
+      const setError = (el, message) => {
+        if (!el) return;
+        el.textContent = message || '';
+        el.classList.toggle('hidden', !message);
+      };
+
+      const setConnection = (mode, text) => {
+        const badge = $('connState');
+        const live = $('liveConn');
+        for (const el of [badge, live]) {
+          if (!el) continue;
+          el.classList.remove('live', 'polling');
+          if (mode === 'live') el.classList.add('live');
+          if (mode === 'polling') el.classList.add('polling');
+        }
+        if ($('connText')) $('connText').textContent = text || 'Idle';
+        if ($('liveConnText')) $('liveConnText').textContent = text || 'Idle';
+      };
+
+      async function api(path, options = {}) {
+        const headers = { Accept: 'application/json', ...(options.headers || {}) };
+        if (options.body !== undefined) headers['Content-Type'] = 'application/json';
+        if (options.method && options.method !== 'GET') headers['X-Console-Request'] = '1';
+        const res = await fetch(path, {
+          ...options,
+          headers,
+          credentials: 'same-origin',
+          body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+        });
+        let data = null;
+        try { data = await res.json(); } catch { data = null; }
+        if (!res.ok) {
+          const message = (data && (data.message || data.error)) || `Request failed (${res.status})`;
+          const err = new Error(message);
+          err.status = res.status;
+          err.data = data;
+          throw err;
+        }
+        return data;
+      }
+
+      function showLogin(message) {
+        $('consoleView').classList.add('hidden');
+        $('loginView').classList.remove('hidden');
+        if (message) setError($('loginError'), message);
+      }
+
+      function showConsole(session) {
+        $('loginView').classList.add('hidden');
+        $('consoleView').classList.remove('hidden');
+        if (session && session.merchantName) {
+          $('merchantLine').textContent = `${session.merchantName}${session.payeeVpa ? ' · ' + session.payeeVpa : ''}`;
+        }
+        if (session && session.payeeVpa) $('payeeVpa').textContent = session.payeeVpa;
+        stopPolling();
+        if (currentPaymentId) startRealtime();
+      }
+
+      function stopPolling() {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      }
+
+      function closeEvents() {
+        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        if (eventSource) {
+          try { eventSource.close(); } catch { }
+          eventSource = null;
+        }
+      }
+
+      function startPolling() {
+        stopPolling();
+        setConnection('polling', 'Polling');
+        pollTimer = setInterval(refreshStatus, 2000);
+      }
+
+      function renderStatus(data) {
+        if (!data || !data.paymentId) return;
+        const phase = data.phase || 'AWAITING_PAYMENT';
+        const badge = $('statusBadge');
+        badge.className = `badge ${phaseClass(phase)}`;
+        $('statusText').textContent = phase;
+
+        $('amountBig').textContent = `₹${data.amount || '0.00'}`;
+        $('orderLine').textContent = `Order ${data.orderId || '—'}`;
+        $('paymentId').textContent = data.paymentId;
+        if (data.payeeVpa) $('payeeVpa').textContent = data.payeeVpa;
+
+        const awaitingDone = phase !== 'AWAITING_PAYMENT' && phase !== 'QUEUED';
+        const detected = phase === 'PAYMENT_DETECTED' || phase === 'SUCCESS';
+        const confirmed = phase === 'SUCCESS';
+        $('stepAwaiting').className = `step ${awaitingDone ? 'done' : 'active'}`;
+        $('stepDetected').className = `step ${confirmed ? 'done' : detected ? 'active' : ''}`;
+        $('stepConfirmed').className = `step ${confirmed ? 'done' : ''}`;
+
+        $('evidenceNotice').classList.toggle('hidden', !detected || confirmed);
+
+        const latency = data.latency || null;
+        if (latency) {
+          const matched = Number(latency.matchedMs);
+          const persisted = Number(latency.persistedMs);
+          if (detectedVisibleMs === null && (detected || confirmed) && Number.isFinite(Number(latency.visibleMs))) {
+            detectedVisibleMs = Number(latency.visibleMs);
+          }
+          const visible = detectedVisibleMs !== null ? detectedVisibleMs : Number(latency.visibleMs);
+          $('latMatched').textContent = fmtMs(matched);
+          $('latPersisted').textContent = fmtMs(Math.max(0, persisted - matched));
+          $('latVisible').textContent = fmtMs(Math.max(0, visible - persisted));
+          $('latTotal').textContent = fmtMs(visible);
+        }
+
+        const when = data.serverNow ? new Date(data.serverNow).toLocaleTimeString() : new Date().toLocaleTimeString();
+        $('updatedLine').textContent = `Last update ${when} · ${data.confirmationStatus || 'UNCONFIRMED'}`;
+
+        if (['SUCCESS', 'FAILED', 'EXPIRED', 'CANCELLED', 'BLOCKED'].includes(phase)) {
+          stopPolling();
+          if (phase !== 'SUCCESS') closeEvents();
+        }
+      }
+
+      async function refreshStatus() {
+        if (!currentPaymentId || refreshInFlight) return;
+        refreshInFlight = true;
+        try {
+          const data = await api(`/api/test-console/payments/${encodeURIComponent(currentPaymentId)}`);
+          setError($('statusError'), '');
+          renderStatus(data);
+        } catch (err) {
+          if (err.status === 401) {
+            closeEvents();
+            stopPolling();
+            showLogin('Console session expired. Unlock again.');
+          } else {
+            setError($('statusError'), err.message);
+          }
+        } finally {
+          refreshInFlight = false;
+        }
+      }
+
+      function startRealtime() {
+        if (!currentPaymentId) return;
+        closeEvents();
+        stopPolling();
+        setConnection('', 'Connecting…');
+
+        try {
+          eventSource = new EventSource(`/api/test-console/payments/${encodeURIComponent(currentPaymentId)}/events`);
+        } catch {
+          startPolling();
+          return;
+        }
+
+        eventSource.onopen = () => {
+          setConnection('live', 'Live');
+          stopPolling();
+        };
+
+        const onEvent = () => { refreshStatus(); };
+        for (const name of ['status_change', 'state_change', 'connected', 'counter_payment_confirmed', 'payment_success', 'session_expired']) {
+          eventSource.addEventListener(name, onEvent);
+        }
+        eventSource.onmessage = onEvent;
+
+        eventSource.onerror = () => {
+          closeEvents();
+          startPolling();
+          reconnectTimer = setTimeout(() => {
+            if (currentPaymentId) startRealtime();
+          }, 5000);
+        };
+      }
+
+      async function checkSession() {
+        try {
+          const session = await api('/api/test-console/session');
+          if (session.authenticated) {
+            showConsole(session);
+          } else {
+            showLogin('');
+          }
+        } catch (err) {
+          showLogin('Test console is unavailable. Check the server configuration.');
+        }
+      }
+
+      $('loginForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        setError($('loginError'), '');
+        const btn = $('loginBtn');
+        btn.disabled = true;
+        try {
+          await api('/api/test-console/session', {
+            method: 'POST',
+            body: { token: $('consoleToken').value }
+          });
+          $('consoleToken').value = '';
+          await checkSession();
+        } catch (err) {
+          setError($('loginError'), err.message);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      $('generateForm').addEventListener('submit', async event => {
+        event.preventDefault();
+        setError($('generateError'), '');
+        const amount = Number($('amountInput').value);
+        if (!Number.isFinite(amount) || amount < 1 || amount > 100) {
+          setError($('generateError'), 'Enter an amount between ₹1 and ₹100.');
+          return;
+        }
+
+        const btn = $('generateBtn');
+        btn.disabled = true;
+        btn.textContent = 'Generating…';
+        closeEvents();
+        stopPolling();
+
+        try {
+          const data = await api('/api/test-console/payments', {
+            method: 'POST',
+            body: { amount: amount.toFixed(2) }
+          });
+          currentPaymentId = data.paymentId;
+          currentCheckoutUrl = data.checkoutUrl || '';
+          detectedVisibleMs = null;
+          $('checkoutLink').value = currentCheckoutUrl;
+          $('openLink').href = currentCheckoutUrl || '#';
+          $('paymentCard').classList.remove('hidden');
+          setError($('statusError'), '');
+          renderStatus(data);
+          startRealtime();
+        } catch (err) {
+          if (err.status === 401) {
+            showLogin('Console session expired. Unlock again.');
+          } else {
+            setError($('generateError'), err.message);
+          }
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Generate Payment Link';
+        }
+      });
+
+      $('copyBtn').addEventListener('click', async () => {
+        if (!currentCheckoutUrl) return;
+        const btn = $('copyBtn');
+        try {
+          await navigator.clipboard.writeText(currentCheckoutUrl);
+        } catch {
+          $('checkoutLink').select();
+          document.execCommand('copy');
+        }
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = 'Copy Link'; }, 1600);
+      });
+
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden && currentPaymentId) refreshStatus();
+      });
+
+      window.addEventListener('beforeunload', () => {
+        closeEvents();
+        stopPolling();
+      });
+
+      checkSession();
+    })();
+  </script>
+</body>
+
+</html>

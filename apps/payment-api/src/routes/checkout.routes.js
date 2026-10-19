@@ -368,6 +368,39 @@ async function checkUpiServerHealth(ctx, enabledMethods = [], sellingMode = 'OFF
   };
 }
 
+/**
+ * Latest observation/verification latency evidence for a session (telemetry
+ * only: never part of a payment decision). Times are milliseconds relative to
+ * the signed observation request entering the payment API.
+ * @param {any} ctx
+ * @param {string} paymentId
+ */
+function readObservationLatency(ctx, paymentId) {
+  try {
+    const row = ctx.db.queryOne(`
+      SELECT observation_id, received_at, matched_ms, persisted_ms, ingest_total_ms, segments_json
+      FROM payment_observation_latency
+      WHERE payment_id = ?
+      ORDER BY received_at DESC
+      LIMIT 1
+    `, [paymentId]);
+    if (!row) return null;
+    let segments = {};
+    try { segments = JSON.parse(row.segments_json || '{}'); } catch {}
+    return {
+      observationId: row.observation_id,
+      receivedAt: row.received_at,
+      matchedMs: row.matched_ms,
+      persistedMs: row.persisted_ms,
+      ingestTotalMs: row.ingest_total_ms,
+      visibleMs: Math.max(0, Date.now() - new Date(row.received_at).getTime()),
+      segments
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function registerCheckoutRoutes(server, ctx) {
   // GET /api/v1/checkout/:id/state
   server.get('/api/v1/checkout/:id/state', async (req, res, params) => {
@@ -442,6 +475,9 @@ export function registerCheckoutRoutes(server, ctx) {
         status: session.status,
         confirmationStatus: session.confirmationStatus || ConfirmationStatus.UNCONFIRMED,
         paymentDetected: false,
+        guestCheckout: session.metadata?.guestCheckout === true && session.metadata?.testConsole === true,
+        testConsole: session.metadata?.testConsole === true,
+        observationLatency: readObservationLatency(ctx, session.id),
         timeRemainingSeconds: 0,
         isTerminal: true,
         branding
@@ -671,6 +707,12 @@ export function registerCheckoutRoutes(server, ctx) {
       receivingAccountId: receivingAccount?.id || snapshot?.id || null,
       providers: UPI_PROVIDERS,
       canClickPaymentDone: session.status === PaymentStatus.ACTIVE,
+      // Scoped guest checkout: only sessions explicitly created for the staging
+      // test console carry metadata.guestCheckout. It skips the WhatsApp OTP gate
+      // for that session only and never grants merchant/operator access.
+      guestCheckout: session.metadata?.guestCheckout === true && session.metadata?.testConsole === true,
+      testConsole: session.metadata?.testConsole === true,
+      observationLatency: readObservationLatency(ctx, session.id),
       returnUrl: session.returnUrl,
       supportEmails,
       supportMobiles,
