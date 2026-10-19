@@ -39,6 +39,9 @@ Thumbs.db
 *.tmp
 *.temp
 
+# Responsive audit output (screenshots + report.json)
+artifacts/
+
 # Root Testing Screenshots
 *.png
 *.jpg

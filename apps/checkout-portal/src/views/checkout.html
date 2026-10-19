@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>{{MERCHANT_NAME}} · {{APP_NAME}} Checkout</title>
   <style>
     :root {
@@ -2816,7 +2816,8 @@
         flex: none !important;
       }
 
-      /* Fixed Bottom Footer Bar */
+      /* Fixed Bottom Footer Bar — padded for the iOS home indicator so the
+         pay button is never covered by the system gesture area. */
       .ypg-sticky-footer {
         position: fixed !important;
         bottom: 0 !important;
@@ -2825,6 +2826,7 @@
         z-index: 45 !important;
         background: #ffffff !important;
         box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.08) !important;
+        padding-bottom: env(safe-area-inset-bottom, 0px) !important;
       }
 
       .pc-only-title,

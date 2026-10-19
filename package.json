@@ -20,6 +20,7 @@
     "test": "node scripts/test-all.js",
     "test:all": "node scripts/test-all.js",
     "test:acceptance": "node --test scripts/production-infrastructure.test.js",
+    "audit:layout": "node scripts/mobile-layout-audit.mjs",
     "typecheck": "tsc -b --noEmit"
   },
   "devDependencies": {
